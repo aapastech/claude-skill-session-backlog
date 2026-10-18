@@ -3,6 +3,6 @@
   "description": "Claude skills by Aapastech",
   "owner": { "name": "Aapastech", "url": "https://github.com/aapastech" },
   "plugins": [
-    { "name": "session-backlog", "source": "./", "description": "Task backlog on your own computer so Claude never forgets tasks in long or parallel sessions." }
+    { "name": "session-backlog", "source": "./plugin", "description": "Task backlog on your own computer so Claude never forgets tasks in long or parallel sessions." }
   ]
 }

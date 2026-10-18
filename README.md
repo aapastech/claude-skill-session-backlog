@@ -61,9 +61,11 @@ Give Claude a few tasks. The first time, Claude will:
 ## What's inside
 
 ```
-skills/session-backlog/SKILL.md        the rules Claude follows every session
-skills/session-backlog/scripts/bl.py   the backlog engine (one stdlib-only Python file, board included)
-dist/session-backlog.zip               the skill packaged for upload in the Claude app
+plugin/skills/session-backlog/SKILL.md        the rules Claude follows every session
+plugin/skills/session-backlog/scripts/bl.py   the backlog engine (one stdlib-only Python file, board included)
+plugin/.claude-plugin/plugin.json             plugin manifest
+.claude-plugin/marketplace.json               lets Claude Code install it by name
+dist/session-backlog.zip                      the skill packaged for upload in the Claude app
 ```
 
 `bl.py` has a small CLI (`init`, `session`, `batch`, `claim`, `update`, `done`, `drop`, `list`, `footer`, `board`). See the command reference at the end of `SKILL.md`.
