@@ -8,7 +8,7 @@ Stdlib only. Run with:  python3 <backlog>/bl.py <command> ...
 """
 import argparse, datetime as dt, html, json, os, re, sys, tempfile
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 ROOT = os.environ.get("BACKLOG_DIR") or os.path.dirname(os.path.abspath(__file__))
 TASKS = os.path.join(ROOT, "tasks")
 SESS = os.path.join(ROOT, "sessions")
@@ -385,7 +385,19 @@ def cmd_footer(a):
 
 def cmd_board(a):
     build_board()
-    print(os.path.join(ROOT, "board.html"))
+    path = os.path.join(ROOT, "board.html")
+    print("file://" + path)
+    if a.open:
+        import subprocess, webbrowser
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            elif os.name == "nt":
+                os.startfile(path)
+            else:
+                webbrowser.open("file://" + path)
+        except Exception as e:
+            print(f"could not open a browser here ({e}); open the file:// link above")
 
 
 # ---------- board ----------
@@ -483,7 +495,8 @@ def main():
     s = sp.add_parser("open"); s.add_argument("--session", required=True); s.set_defaults(f=cmd_open)
     s = sp.add_parser("footer"); s.add_argument("--session", required=True); s.add_argument("--exclude", nargs="*")
     s.set_defaults(f=cmd_footer)
-    s = sp.add_parser("board"); s.set_defaults(f=cmd_board)
+    s = sp.add_parser("board"); s.add_argument("--open", action="store_true", help="open the board in the default browser")
+    s.set_defaults(f=cmd_board)
     s = sp.add_parser("init"); s.add_argument("--owner"); s.add_argument("--areas", help="comma separated")
     s.set_defaults(f=cmd_init)
     s = sp.add_parser("version"); s.set_defaults(f=cmd_version)

@@ -125,6 +125,11 @@ Skip capture only for a one-off question answered fully in the same reply. Captu
 
 `BOARD.md` is the same board as text.
 
+**When the user asks to see it** ("show my backlog", "open the board", "what's open?"):
+- On the computer that holds the backlog, run `$BL board --open` to open it in their default browser. Through a device bridge, open `file://<backlog folder>/board.html` with the browser tools available on that computer.
+- Where no browser on that computer is reachable (e.g. a phone chat), paste a short summary from `$BL list` grouped by area, with overdue and waiting-on-user tasks first.
+- The board is a local file. It is never published, uploaded or shared.
+
 ## Command reference
 ```
 $BL init    [--owner NAME] [--areas "A,B,C"]                first-time setup / change owner or areas
@@ -141,6 +146,6 @@ $BL drop    ID --session SID --reason R
 $BL list    [--all] [--area A] [--session SID] [--json]
 $BL show    ID
 $BL footer  --session SID [--exclude IDs]
-$BL board                                                 rebuild board.html / BOARD.md
+$BL board   [--open]                                       rebuild board.html / BOARD.md; --open shows it in the browser
 ```
 Statuses: `inbox`, `ready`, `in_progress`, `blocked`, `waiting_user`, `done`, `dropped`. Priorities run from `P0` (urgent) to `P3`; the default is `P2`.
