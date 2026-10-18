@@ -1,0 +1,11 @@
+{
+  "name": "session-backlog",
+  "displayName": "Session Backlog",
+  "version": "2.0.0",
+  "description": "Stops Claude forgetting tasks in long or parallel sessions: every task and sub-task goes into a backlog on your own computer, with area, ETA and session, re-read every turn, with a live board.",
+  "author": { "name": "Shikha Gupta", "url": "https://github.com/aapastech" },
+  "homepage": "https://github.com/aapastech/claude-skill-session-backlog",
+  "repository": "https://github.com/aapastech/claude-skill-session-backlog",
+  "license": "MIT",
+  "keywords": ["tasks", "backlog", "productivity", "todo", "long-sessions"]
+}
