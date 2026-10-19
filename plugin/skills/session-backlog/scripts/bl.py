@@ -1,31 +1,44 @@
 #!/usr/bin/env python3
-"""bl.py - session-backlog engine: a local task backlog shared by every Claude session on this device.
+"""bl.py - Aapastech Session Backlog engine: a local task backlog shared by every
+AI session (any assistant, any model) that can run commands on this device.
 
 Storage: one JSON file per task in tasks/, one per session in sessions/.
-One-file-per-task means parallel sessions never overwrite each other.
+One-file-per-task plus a per-task lock means parallel sessions never overwrite
+each other or both win a claim.
 Every write regenerates board.html (visual board) and BOARD.md (text board).
-Stdlib only. Run with:  python3 <backlog>/bl.py <command> ...
+All files are UTF-8 on every OS. Stdlib only, Python 3.8+, macOS / Windows / Linux.
+Run with:  python3 <backlog>/bl.py <command> ...   (Windows: py -3 <backlog>\bl.py ...)
 """
-import argparse, datetime as dt, html, json, os, re, sys, tempfile
+import argparse, datetime as dt, json, os, re, sys, tempfile, time
+from contextlib import contextmanager
 
-VERSION = "2.1.0"
+VERSION = "3.0.0"
+ENC = "utf-8"
 ROOT = os.environ.get("BACKLOG_DIR") or os.path.dirname(os.path.abspath(__file__))
 TASKS = os.path.join(ROOT, "tasks")
 SESS = os.path.join(ROOT, "sessions")
 CONFIG = os.path.join(ROOT, "config.json")
-DEFAULT_AREAS = ["Work", "Clients", "Product", "Marketing", "Admin", "Personal", "Claude-Ops"]
+DEFAULT_AREAS = ["Work", "Clients", "Product", "Marketing", "Admin", "Personal", "AI-Ops"]
+DEFAULT_TITLE = "Aapastech Backlog"
+LOCK_STALE_S = 30     # a lock older than this was left by a crashed process
+LOCK_WAIT_S = 15      # give up waiting for a busy task after this long
+
+def read_json(path):
+    # utf-8-sig also accepts files saved with a BOM (e.g. Windows Notepad)
+    with open(path, encoding="utf-8-sig") as f:
+        return json.load(f)
 
 def load_config():
-    c = {"owner": "you", "areas": DEFAULT_AREAS, "stale_hours": 24}
+    c = {"owner": "you", "areas": DEFAULT_AREAS, "stale_hours": 24, "title": DEFAULT_TITLE}
     if os.path.exists(CONFIG):
         try:
-            with open(CONFIG) as f:
-                c.update(json.load(f))
+            c.update(read_json(CONFIG))
         except Exception:
             pass
     return c
 
 CFG = load_config()
+TITLE = CFG.get("title") or DEFAULT_TITLE
 OWNER = CFG["owner"]
 STALE_HOURS = int(CFG.get("stale_hours", 24))
 AREAS = CFG["areas"]
@@ -83,34 +96,80 @@ def norm_area(a):
             return k
     return a.strip()
 
-def write_json(path, obj):
+def replace_file(tmp, path):
+    """os.replace with retries: on Windows the target can be briefly held open
+    by another reader (a browser, another session), which raises PermissionError."""
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)  # atomic
+            return
+        except PermissionError:
+            if attempt == 19:
+                try: os.remove(tmp)
+                except OSError: pass
+                raise
+            time.sleep(0.05)
+
+def write_text(path, text):
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
-    with os.fdopen(fd, "w") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)  # atomic
+    with os.fdopen(fd, "w", encoding=ENC, newline="\n") as f:
+        f.write(text)
+    replace_file(tmp, path)
+
+def write_json(path, obj):
+    write_text(path, json.dumps(obj, indent=2, ensure_ascii=False))
 
 def tpath(tid):
     return os.path.join(TASKS, f"{tid}.json")
 
 def load(tid):
-    tid = tid.upper()
-    if not tid.startswith("T-"):
-        tid = "T-" + tid.zfill(4)
+    tid = norm_id(tid)
     p = tpath(tid)
-    if not os.path.exists(p):
+    if not os.path.exists(p) or os.path.getsize(p) == 0:
         sys.exit(f"no such task {tid}")
-    with open(p) as f:
-        return json.load(f)
+    return read_json(p)
+
+def norm_id(tid):
+    tid = tid.upper()
+    return tid if tid.startswith("T-") else "T-" + tid.zfill(4)
+
+@contextmanager
+def task_lock(tid):
+    """Exclusive lock on one task for a read-modify-write. A lock file created
+    with O_EXCL works the same on every OS and filesystem; a stale lock left
+    by a crashed process is broken after LOCK_STALE_S."""
+    lock = os.path.join(TASKS, f".{norm_id(tid)}.lock")
+    deadline = time.time() + LOCK_WAIT_S
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock) > LOCK_STALE_S:
+                    os.remove(lock)
+                    continue
+            except OSError:
+                continue  # holder released it between our checks
+            if time.time() > deadline:
+                sys.exit(f"{norm_id(tid)} is busy (another session is writing it) - retry in a moment")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try: os.remove(lock)
+        except OSError: pass
 
 def all_tasks():
     out = []
     for fn in sorted(os.listdir(TASKS)):
         if fn.endswith(".json") and fn.startswith("T-"):
             try:
-                with open(os.path.join(TASKS, fn)) as f:
-                    out.append(json.load(f))
+                out.append(read_json(os.path.join(TASKS, fn)))
             except Exception:
-                pass
+                pass  # empty placeholder of a task being created right now
     return out
 
 def all_sessions():
@@ -118,9 +177,8 @@ def all_sessions():
     for fn in os.listdir(SESS):
         if fn.endswith(".json"):
             try:
-                with open(os.path.join(SESS, fn)) as f:
-                    s = json.load(f)
-                    out[s["id"]] = s
+                s = read_json(os.path.join(SESS, fn))
+                out[s["id"]] = s
             except Exception:
                 pass
     return out
@@ -144,8 +202,8 @@ def touch_session(sid):
     p = os.path.join(SESS, safe(sid) + ".json")
     s = {}
     if os.path.exists(p):
-        with open(p) as f:
-            s = json.load(f)
+        try: s = read_json(p)
+        except Exception: s = {}
     s.setdefault("id", sid)
     s.setdefault("label", sid)
     s.setdefault("first_seen", iso(now()))
@@ -194,8 +252,8 @@ def cmd_session(a):
     p = os.path.join(SESS, safe(a.id) + ".json")
     s = {}
     if os.path.exists(p):
-        with open(p) as f:
-            s = json.load(f)
+        try: s = read_json(p)
+        except Exception: s = {}
     s.update({"id": a.id, "label": a.label or s.get("label") or a.id,
               "surface": a.surface or s.get("surface"), "url": a.url or s.get("url")})
     s.setdefault("first_seen", iso(now()))
@@ -205,10 +263,24 @@ def cmd_session(a):
     open_for(a.id)
 
 def make_task(d, sid):
-    tid = new_id()
     status = d.get("status", "ready")
     if status not in STATUSES:
         sys.exit(f"bad status {status}")
+    if not str(d.get("title") or "").strip():
+        sys.exit("every task needs a title")
+    eta = parse_eta(d.get("eta", "30m"))
+    par = load(d["parent"]) if d.get("parent") else None
+    tid = new_id()
+    try:
+        return _fill_task(tid, d, sid, status, eta, par)
+    except BaseException:
+        # never leave an empty placeholder behind (it would burn the id)
+        p = tpath(tid)
+        if os.path.exists(p) and os.path.getsize(p) == 0:
+            os.remove(p)
+        raise
+
+def _fill_task(tid, d, sid, status, eta, par):
     t = {
         "id": tid, "title": d["title"].strip(), "area": norm_area(d.get("area")),
         "parent": (d.get("parent") or None), "status": status,
@@ -219,12 +291,11 @@ def make_task(d, sid):
         "completed_at": None, "completed_by": None,
         "eta_minutes": None, "due_at": None, "outputs": [], "log": [],
     }
-    if t["parent"]:
-        par = load(t["parent"])
+    if par:
         t["parent"] = par["id"]
         if not d.get("area"):
             t["area"] = par["area"]
-    set_eta(t, parse_eta(d.get("eta", "30m")), sid)
+    set_eta(t, eta, sid)
     log(t, sid, "created")
     if status == "in_progress":
         t["claimed_by"], t["claimed_at"], t["started_at"] = sid, iso(now()), iso(now())
@@ -244,7 +315,10 @@ def cmd_batch(a):
     """JSON list of {title, area, eta, parent?, children?: [...], status?, next?, priority?}.
     'parent' may be an existing id; 'children' nest sub-tasks under the new task."""
     touch_session(a.session)
-    data = json.load(sys.stdin if a.file == "-" else open(a.file))
+    if a.file == "-":
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
+    else:
+        data = read_json(a.file)
     def walk(items, parent=None):
         for d in items:
             kids = d.pop("children", [])
@@ -258,6 +332,12 @@ def cmd_batch(a):
 
 def cmd_update(a):
     touch_session(a.session)
+    with task_lock(a.id):
+        t = _update(a)
+    build_board()
+    print(short(t))
+
+def _update(a):
     t = load(a.id)
     changed = []
     if a.title: t["title"] = a.title; changed.append("title")
@@ -281,11 +361,17 @@ def cmd_update(a):
     if a.log: msg = (msg + " | " if msg else "") + a.log
     if msg: log(t, a.session, msg)
     if t["claimed_by"] == a.session: t["claimed_at"] = iso(now())  # heartbeat
-    save(t)
-    print(short(t))
+    save(t, rebuild=False)
+    return t
 
 def cmd_claim(a):
     touch_session(a.session)
+    with task_lock(a.id):
+        t = _claim(a)
+    build_board()
+    print(short(t))
+
+def _claim(a):
     t = load(a.id)
     cur = t.get("claimed_by")
     if t["status"] in ("done", "dropped"):
@@ -299,11 +385,21 @@ def cmd_claim(a):
     t["started_at"] = t.get("started_at") or iso(now())
     set_eta(t, parse_eta(a.eta) if a.eta else (t.get("eta_minutes") or 30), a.session)
     log(t, a.session, "claimed")
-    save(t)
-    print(short(t))
+    save(t, rebuild=False)
+    return t
 
 def cmd_done(a):
     touch_session(a.session)
+    with task_lock(a.id):
+        t = _done(a)
+    build_board()
+    print(short(t))
+    if t.get("parent"):
+        sib = [k for k in all_tasks() if k.get("parent") == t["parent"] and k["status"] in OPEN]
+        if not sib:
+            print(f"All sub-tasks of {t['parent']} are closed - verify and close {t['parent']} too.")
+
+def _done(a):
     t = load(a.id)
     kids = [k for k in all_tasks() if k.get("parent") == t["id"] and k["status"] in OPEN]
     if kids and not a.force:
@@ -319,19 +415,17 @@ def cmd_done(a):
     log(t, a.session, f"DONE (actual {fmt_min(actual)} vs ETA {fmt_min(t.get('eta_minutes'))})"
         + (f" | {a.log}" if a.log else ""))
     t["next_action"] = ""
-    save(t)
-    print(short(t))
-    if t.get("parent"):
-        sib = [k for k in all_tasks() if k.get("parent") == t["parent"] and k["status"] in OPEN]
-        if not sib:
-            print(f"All sub-tasks of {t['parent']} are closed - verify and close {t['parent']} too.")
+    save(t, rebuild=False)
+    return t
 
 def cmd_drop(a):
     touch_session(a.session)
-    t = load(a.id)
-    t["status"] = "dropped"
-    log(t, a.session, f"DROPPED: {a.reason}")
-    save(t)
+    with task_lock(a.id):
+        t = load(a.id)
+        t["status"] = "dropped"
+        log(t, a.session, f"DROPPED: {a.reason}")
+        save(t, rebuild=False)
+    build_board()
     print(short(t))
 
 def cmd_show(a):
@@ -402,10 +496,19 @@ def cmd_board(a):
 
 # ---------- board ----------
 def build_board():
+    """Best effort: the task files are the source of truth, so a board that
+    cannot be written right now (file held open on Windows) must not fail
+    the command that changed a task. The next write rebuilds it."""
+    try:
+        _build_board()
+    except OSError as e:
+        print(f"(board not refreshed this time: {e})", file=sys.stderr)
+
+def _build_board():
     ts = all_tasks()
     sess = all_sessions()
     # BOARD.md
-    lines = [f"# Backlog board  (generated {iso(now())})", ""]
+    lines = [f"# {TITLE}  (generated {iso(now())})", ""]
     for st in STATUSES:
         group = [t for t in ts if t["status"] == st]
         if st in ("done", "dropped"): group = group[-30:]
@@ -414,33 +517,30 @@ def build_board():
         for t in group:
             lines.append(f"- {short(t)}  | by {t.get('created_by')}" + (f" | done by {t.get('completed_by')}" if t.get('completed_by') else ""))
         lines.append("")
-    with open(os.path.join(ROOT, "BOARD.md"), "w") as f:
-        f.write("\n".join(lines))
+    write_text(os.path.join(ROOT, "BOARD.md"), "\n".join(lines))
     # board.html
-    data = json.dumps({"tasks": ts, "sessions": sess, "generated": iso(now()),
+    data = json.dumps({"tasks": ts, "sessions": sess, "generated": iso(now()), "title": TITLE,
                        "statuses": STATUSES, "labels": LABEL, "stale_hours": STALE_HOURS},
                       ensure_ascii=False).replace("</", "<\\/")
     custom = os.path.join(ROOT, "board_template.html")
     if os.path.exists(custom):
-        with open(custom) as f:
+        with open(custom, encoding="utf-8-sig") as f:
             tpl = f.read()
     else:
         tpl = BOARD_TEMPLATE
     out = tpl.replace("/*__DATA__*/null", data)
-    tmp = os.path.join(ROOT, ".board.tmp")
-    with open(tmp, "w") as f:
-        f.write(out)
-    os.replace(tmp, os.path.join(ROOT, "board.html"))
+    write_text(os.path.join(ROOT, "board.html"), out)
 
 
 def cmd_init(a):
     c = load_config()
     if a.owner: c["owner"] = a.owner
     if a.areas: c["areas"] = [x.strip() for x in a.areas.split(",") if x.strip()]
+    if a.title: c["title"] = a.title
     c["version"] = VERSION
     write_json(CONFIG, c)
-    global OWNER, AREAS
-    OWNER, AREAS = c["owner"], c["areas"]
+    global OWNER, AREAS, TITLE
+    OWNER, AREAS, TITLE = c["owner"], c["areas"], c.get("title") or DEFAULT_TITLE
     LABEL["waiting_user"] = f"Waiting on {OWNER}"
     build_board()
     print(f"backlog ready at {ROOT}")
@@ -456,7 +556,27 @@ def cmd_areas(a):
         for x in a.add:
             if x not in c["areas"]: c["areas"].append(x)
         write_json(CONFIG, c)
+    if a.rename:
+        old, new = a.rename
+        c["areas"] = [new if x == old else x for x in c["areas"]]
+        if new not in c["areas"]: c["areas"].append(new)
+        write_json(CONFIG, c)
+        moved = 0
+        for t in all_tasks():
+            if t.get("area") == old:
+                with task_lock(t["id"]):
+                    cur = load(t["id"])
+                    cur["area"] = new
+                    log(cur, "bl", f"area {old} -> {new}")
+                    save(cur, rebuild=False)
+                moved += 1
+        build_board()
+        print(f"renamed area {old} -> {new} on {moved} task(s)")
     print(", ".join(c["areas"]))
+
+def cmd_where(a):
+    print(ROOT)
+    print(f"engine {VERSION} | board file://{os.path.join(ROOT, 'board.html')}")
 
 def main():
     p = argparse.ArgumentParser(prog="bl")
@@ -498,10 +618,20 @@ def main():
     s = sp.add_parser("board"); s.add_argument("--open", action="store_true", help="open the board in the default browser")
     s.set_defaults(f=cmd_board)
     s = sp.add_parser("init"); s.add_argument("--owner"); s.add_argument("--areas", help="comma separated")
+    s.add_argument("--title", help="board title (default: Aapastech Backlog)")
     s.set_defaults(f=cmd_init)
     s = sp.add_parser("version"); s.set_defaults(f=cmd_version)
-    s = sp.add_parser("areas"); s.add_argument("--add", nargs="*"); s.set_defaults(f=cmd_areas)
+    s = sp.add_parser("areas"); s.add_argument("--add", nargs="*")
+    s.add_argument("--rename", nargs=2, metavar=("OLD", "NEW"), help="rename an area on config and every task")
+    s.set_defaults(f=cmd_areas)
+    s = sp.add_parser("where"); s.set_defaults(f=cmd_where)
 
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            # a cp1252 / latin-1 console shows '?' instead of crashing on an em dash
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
     a = p.parse_args()
     a.f(a)
 
@@ -510,7 +640,7 @@ BOARD_TEMPLATE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Backlog</title>
+<title>Backlog</title>
 <style>
 :root{
   --bg:#f6f5f2;--panel:#ffffff;--ink:#1d1d1b;--muted:#6b6a65;--line:#e4e2dc;
@@ -574,7 +704,7 @@ button{background:var(--chip);color:var(--ink);border:1px solid var(--line);bord
 </head>
 <body>
 <header>
-  <h1>Claude Backlog</h1>
+  <h1 id="ttl">Backlog</h1>
   <div class="stats" id="stats"></div>
   <div class="controls">
     <input id="q" placeholder="Search…" size="14">
@@ -588,6 +718,7 @@ button{background:var(--chip);color:var(--ink);border:1px solid var(--line);bord
 <dialog id="dlg"></dialog>
 <script>
 const D = /*__DATA__*/null;
+document.title = D.title || "Backlog"; document.getElementById("ttl").textContent = D.title || "Backlog";
 const L = D.labels, S = D.sessions;
 const COLS = [["inbox","ready"],["in_progress"],["blocked"],["waiting_user"],["done","dropped"]];
 const COLNAME = ["To do","In progress","Blocked",L.waiting_user,"Done"];
@@ -640,7 +771,7 @@ function render(){
   const roots = vis.filter(t=>!t.parent || !visIds.has(t.parent));
   const lanes={}; roots.forEach(t=>(lanes[t.area]??=[]).push(t));
   const m=document.getElementById("main");
-  if(!roots.length){ m.innerHTML=`<div class="empty">Nothing here. Tasks appear as soon as a Claude session captures them.</div>`; return; }
+  if(!roots.length){ m.innerHTML=`<div class="empty">Nothing here. Tasks appear as soon as an AI session captures them.</div>`; return; }
   m.innerHTML = Object.keys(lanes).sort().map(ar=>{
     const ts=lanes[ar];
     return `<section class="lane"><h2>${esc(ar)} <span class="n">${ts.length} task${ts.length>1?"s":""}</span></h2><div class="cols">`+

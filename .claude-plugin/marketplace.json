@@ -1,8 +1,15 @@
 {
   "name": "aapastech",
-  "description": "Claude skills by Aapastech",
-  "owner": { "name": "Aapastech", "url": "https://github.com/aapastech" },
+  "description": "Skills and tools by Aapastech",
+  "owner": {
+    "name": "Aapastech",
+    "url": "https://github.com/aapastech"
+  },
   "plugins": [
-    { "name": "session-backlog", "source": "./plugin", "description": "Task backlog on your own computer so Claude never forgets tasks in long or parallel sessions." }
+    {
+      "name": "session-backlog",
+      "source": "./plugin",
+      "description": "Task backlog on your own computer so AI assistants never forget tasks in long or parallel sessions."
+    }
   ]
 }
