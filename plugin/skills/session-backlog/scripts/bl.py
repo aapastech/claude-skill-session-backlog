@@ -12,7 +12,7 @@ Run with:  python3 <backlog>/bl.py <command> ...   (Windows: py -3 <backlog>\bl.
 import argparse, datetime as dt, json, os, re, sys, tempfile, time
 from contextlib import contextmanager
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 ENC = "utf-8"
 ROOT = os.environ.get("BACKLOG_DIR") or os.path.dirname(os.path.abspath(__file__))
 TASKS = os.path.join(ROOT, "tasks")
@@ -114,6 +114,10 @@ def write_text(path, text):
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
     with os.fdopen(fd, "w", encoding=ENC, newline="\n") as f:
         f.write(text)
+    try:
+        os.chmod(tmp, 0o644)  # mkstemp creates 0600; keep the usual readable mode
+    except OSError:
+        pass
     replace_file(tmp, path)
 
 def write_json(path, obj):
@@ -520,6 +524,7 @@ def _build_board():
     write_text(os.path.join(ROOT, "BOARD.md"), "\n".join(lines))
     # board.html
     data = json.dumps({"tasks": ts, "sessions": sess, "generated": iso(now()), "title": TITLE,
+                       "home": os.path.expanduser("~").replace("\\", "/"),
                        "statuses": STATUSES, "labels": LABEL, "stale_hours": STALE_HOURS},
                       ensure_ascii=False).replace("</", "<\\/")
     custom = os.path.join(ROOT, "board_template.html")
@@ -687,6 +692,17 @@ main{padding:16px 20px 60px}
 .who{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .who span{background:var(--chip);border-radius:5px;padding:1px 6px;font-size:11px;color:var(--muted)}
 .who span.c{color:var(--ok)}
+details.res{margin-top:6px;border-top:1px dashed var(--line);padding-top:4px;font-size:12px}
+details.res summary{cursor:pointer;color:var(--muted);list-style:none;user-select:none}
+details.res summary::-webkit-details-marker{display:none}
+details.res summary::before{content:"▸ ";}
+details.res[open] summary::before{content:"▾ ";}
+details.res .rs{margin-top:4px;display:grid;gap:4px}
+details.res .lbl{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+details.res ul{margin:0;padding-left:16px}
+details.res li{margin:1px 0;word-break:break-word}
+details.res .lg{color:var(--muted);word-break:break-word}
+.lnk{word-break:break-all}
 dialog{border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--ink);max-width:680px;width:92vw;padding:20px}
 dialog::backdrop{background:rgba(0,0,0,.35)}
 dialog h2{margin:0 0 4px;font-size:17px}
@@ -780,6 +796,40 @@ function render(){
       `</div></section>`;
   }).join("");
 }
+// ---- resources: every link / local file a task mentions, reachable from the card ----
+const RX = /(https?:\/\/[^\s'"<>)\]]+|file:\/\/[^\s'"<>)\]]+|(?:~|\/Users|\/home|[A-Za-z]:\\)[\/\\][^\s'"<>)\],;|]+)/g;
+const trimP = u => u.replace(/[.,;:]+$/,"");
+const toHref = u => /^(https?|file):/.test(u) ? u
+  : u.startsWith("~") ? "file://"+encodeURI((D.home||"")+u.slice(1))
+  : /^[A-Za-z]:\\/.test(u) ? "file:///"+encodeURI(u.replace(/\\/g,"/"))
+  : "file://"+encodeURI(u);
+const label = u => {
+  let m = u.match(/github\.com\/([^/]+)\/([^/]+)\/(pull|issues|commit)\/([0-9a-f]+)/);
+  if(m) return m[3]==="commit" ? `${m[2]}@${m[4].slice(0,7)}` : `${m[2]}#${m[4]}`;
+  if(/^file:|^[~\/]|^[A-Za-z]:\\/.test(u)){ const d=decodeURI(u.replace(/^file:\/\//,"")); return "📄 "+d.split(/[\/\\]/).filter(Boolean).slice(-2).join("/"); }
+  try{ const x=new URL(u); return x.hostname.replace(/^www\./,"")+(x.pathname.length>1?x.pathname.slice(0,40):""); }catch(e){ return u.slice(0,60); }
+};
+const linkify = txt => { const s=String(txt??""); let out="", last=0;
+  s.replace(RX,(m,_g,off)=>{ const u=trimP(m); out+=esc(s.slice(last,off))+`<a class="lnk" href="${esc(toHref(u))}" target="_blank" onclick="event.stopPropagation()">${esc(label(u))}</a>`; last=off+u.length; return m; });
+  return out+esc(s.slice(last)); };
+function resources(t){
+  const seen=new Set(), list=[];
+  const add=u=>{ u=trimP(u); const h=toHref(u); if(!seen.has(h)){ seen.add(h); list.push([h,label(u),u]); } };
+  (t.outputs||[]).forEach(o=>{ const hits=String(o).match(RX); hits?hits.forEach(add):list.push([null,o,o]); });
+  [t.next_action,t.source,...(t.log||[]).map(e=>e.msg)].forEach(x=>(String(x??"").match(RX)||[]).forEach(add));
+  return list;
+}
+function resBlock(t){
+  const res=resources(t), logs=(t.log||[]).slice(-3).reverse();
+  if(!res.length && !logs.length && !t.source) return "";
+  const li=res.map(([h,l,raw])=>h?`<li><a class="lnk" href="${esc(h)}" target="_blank" title="${esc(raw)}" onclick="event.stopPropagation()">${esc(l)}</a></li>`:`<li>${esc(l)}</li>`).join("");
+  return `<details class="res" onclick="event.stopPropagation()"><summary>Details${res.length?` · ${res.length} link${res.length>1?"s":""}`:""}</summary><div class="rs">
+    ${li?`<div><div class="lbl">Links &amp; files</div><ul>${li}</ul></div>`:""}
+    ${t.next_action&&OPEN.has(t.status)?`<div><div class="lbl">Next</div>${linkify(t.next_action)}</div>`:""}
+    ${t.source?`<div><div class="lbl">Source</div><span class="lg">${linkify(t.source)}</span></div>`:""}
+    ${logs.length?`<div><div class="lbl">Latest</div>${logs.map(e=>`<div class="lg"><b>${esc(local(e.at))}</b> ${linkify(e.msg)}</div>`).join("")}</div>`:""}
+  </div></details>`;
+}
 function card(t){
   const kids=D.tasks.filter(k=>k.parent===t.id);
   const kd = kids.length? `<ul class="kids">`+kids.map(k=>`<li><span class="dot ${k.status}"></span><span>${esc(k.id)} ${esc(k.title)} <span style="color:var(--muted)">· ${k.status==="done"?"done":"ETA "+fm(k.eta_minutes)}${over(k)?" ⚠":""}</span></span></li>`).join("")+`</ul>`:"";
@@ -788,8 +838,9 @@ function card(t){
     <div class="top"><span>${esc(t.id)} · ${esc(t.priority||"")}</span><span>${L[t.status]}</span></div>
     <div class="title">${esc(t.title)}</div>${par}
     <div class="sub">${etaHtml(t)}</div>
-    ${t.next_action&&OPEN.has(t.status)?`<div class="sub">Next: ${esc(t.next_action)}</div>`:""}
+    ${t.next_action&&OPEN.has(t.status)?`<div class="sub">Next: ${linkify(t.next_action)}</div>`:""}
     ${kd}
+    ${resBlock(t)}
     <div class="who"><span>created by ${esc(sl(t.created_by))}</span>${t.claimed_by&&OPEN.has(t.status)?`<span>worked by ${esc(sl(t.claimed_by))}</span>`:""}${t.completed_by?`<span class="c">completed by ${esc(sl(t.completed_by))}</span>`:""}</div>
   </div>`;
 }
@@ -797,13 +848,13 @@ function openT(id){
   const t=byId[id]; const d=document.getElementById("dlg");
   const row=(k,v)=>`<tr><td>${k}</td><td>${v}</td></tr>`;
   d.innerHTML=`<h2>${esc(t.id)} · ${esc(t.title)}</h2><div style="color:var(--muted);font-size:13px">${esc(t.area)} · ${L[t.status]} · ${esc(t.priority||"")}</div>
-  <table>${row("ETA",etaHtml(t))}${row("Due",local(t.due_at))}${row("Next action",esc(t.next_action)||"—")}
+  <table>${row("ETA",etaHtml(t))}${row("Due",local(t.due_at))}${row("Next action",linkify(t.next_action)||"—")}
   ${row("Parent",t.parent?esc(t.parent+" "+(byId[t.parent]?.title||"")):"—")}
   ${row("Created",local(t.created_at)+" by "+slink(t.created_by))}
   ${row("Worked by",slink(t.claimed_by))}${row("Completed",t.completed_at?local(t.completed_at)+" by "+slink(t.completed_by):"—")}
-  ${row("Source",esc(t.source)||"—")}
-  ${row("Outputs",(t.outputs||[]).map(o=>/^https?:|^file:/.test(o)?`<a href="${esc(o)}" target="_blank">${esc(o)}</a>`:esc(o)).join("<br>")||"—")}</table>
-  <div class="log">${(t.log||[]).slice().reverse().map(e=>`<div><time>${local(e.at)}</time><b>${esc(sl(e.session))}</b> — ${esc(e.msg)}</div>`).join("")}</div>
+  ${row("Source",linkify(t.source)||"—")}
+  ${row("Links & files",resources(t).map(([h,l,raw])=>h?`<a class="lnk" href="${esc(h)}" target="_blank">${esc(raw)}</a>`:esc(l)).join("<br>")||"—")}</table>
+  <div class="log">${(t.log||[]).slice().reverse().map(e=>`<div><time>${local(e.at)}</time><b>${esc(sl(e.session))}</b> — ${linkify(e.msg)}</div>`).join("")}</div>
   <p style="text-align:right;margin:12px 0 0"><button onclick="dlg.close()">Close</button></p>`;
   d.showModal();
 }

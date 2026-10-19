@@ -9,6 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugin", "skills", "session-backlog", "scripts")
 BL = os.path.abspath(os.path.join(SCRIPTS, "bl.py"))
 MCP = os.path.abspath(os.path.join(SCRIPTS, "backlog_mcp.py"))
+import re as _re
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugin", "skills", "session-backlog", "scripts", "bl.py"), encoding="utf-8") as _f:
+    ENGINE_VERSION = _re.search(r'^VERSION = "([\d.]+)"', _f.read(), _re.M).group(1)
 TITLE = "Epic A — hardening → BE · café"
 
 
@@ -207,12 +210,12 @@ class McpTests(Base):
         with open(target, encoding="utf-8") as f:
             src = f.read()
         with open(target, "w", encoding="utf-8") as f:
-            f.write(src.replace('VERSION = "3.0.0"', 'VERSION = "2.1.0"'))
+            f.write(src.replace(f'VERSION = "{ENGINE_VERSION}"', 'VERSION = "2.1.0"'))
         self.start()
         self.rpc("initialize", {})
         text, err = self.tool("backlog_where")
         self.assertFalse(err, text)
-        self.assertIn("engine 3.0.0", text)
+        self.assertIn(f"engine {ENGINE_VERSION}", text)
 
 
 if __name__ == "__main__":
