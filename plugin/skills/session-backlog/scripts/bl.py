@@ -702,6 +702,7 @@ details.res .lbl{font-size:10px;text-transform:uppercase;letter-spacing:.06em;co
 details.res ul{margin:0;padding-left:16px}
 details.res li{margin:1px 0;word-break:break-word}
 details.res .lg{color:var(--muted);word-break:break-word}
+details.res .sub-r{padding:3px 0;border-bottom:1px dashed var(--line)}
 .lnk{word-break:break-all}
 dialog{border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--ink);max-width:680px;width:92vw;padding:20px}
 dialog::backdrop{background:rgba(0,0,0,.35)}
@@ -819,20 +820,40 @@ function resources(t){
   [t.next_action,t.source,...(t.log||[]).map(e=>e.msg)].forEach(x=>(String(x??"").match(RX)||[]).forEach(add));
   return list;
 }
+// Open sub-tasks at every depth: sub-tasks have no card of their own, so their
+// links and next steps must be reachable from the root card.
+function openDescendants(t, depth=1){
+  return D.tasks.filter(k=>k.parent===t.id).flatMap(k=>[
+    ...(OPEN.has(k.status)?[[k,depth]]:[]), ...openDescendants(k, depth+1)]);
+}
+function subBlock(t){
+  const subs=openDescendants(t);
+  if(!subs.length) return ["",0];
+  let n=0;
+  const html=subs.map(([k,depth])=>{
+    const r=resources(k); n+=r.length;
+    const links=r.map(([h,l,raw])=>h?`<a class="lnk" href="${esc(h)}" target="_blank" title="${esc(raw)}" onclick="event.stopPropagation()">${esc(l)}</a>`:esc(l)).join(" · ");
+    return `<div class="sub-r" style="margin-left:${(depth-1)*10}px"><a href="#" class="lnk" onclick="event.preventDefault();event.stopPropagation();openT('${k.id}')">${esc(k.id)}</a> ${esc(k.title)} <span class="lg">(${esc(L[k.status])})</span>
+      ${k.next_action?`<div class="lg">Next: ${linkify(k.next_action)}</div>`:""}${links?`<div>${links}</div>`:""}</div>`;
+  }).join("");
+  return [`<div><div class="lbl">Open sub-tasks</div>${html}</div>`, n];
+}
 function resBlock(t){
   const res=resources(t), logs=(t.log||[]).slice(-3).reverse();
-  if(!res.length && !logs.length && !t.source) return "";
+  const [subs, subLinks]=subBlock(t);
+  if(!res.length && !logs.length && !t.source && !subs) return "";
   const li=res.map(([h,l,raw])=>h?`<li><a class="lnk" href="${esc(h)}" target="_blank" title="${esc(raw)}" onclick="event.stopPropagation()">${esc(l)}</a></li>`:`<li>${esc(l)}</li>`).join("");
-  return `<details class="res" onclick="event.stopPropagation()"><summary>Details${res.length?` · ${res.length} link${res.length>1?"s":""}`:""}</summary><div class="rs">
+  return `<details class="res" onclick="event.stopPropagation()"><summary>Details${res.length+subLinks?` · ${res.length+subLinks} link${res.length+subLinks>1?"s":""}`:""}</summary><div class="rs">
     ${li?`<div><div class="lbl">Links &amp; files</div><ul>${li}</ul></div>`:""}
     ${t.next_action&&OPEN.has(t.status)?`<div><div class="lbl">Next</div>${linkify(t.next_action)}</div>`:""}
     ${t.source?`<div><div class="lbl">Source</div><span class="lg">${linkify(t.source)}</span></div>`:""}
+    ${subs}
     ${logs.length?`<div><div class="lbl">Latest</div>${logs.map(e=>`<div class="lg"><b>${esc(local(e.at))}</b> ${linkify(e.msg)}</div>`).join("")}</div>`:""}
   </div></details>`;
 }
 function card(t){
   const kids=D.tasks.filter(k=>k.parent===t.id);
-  const kd = kids.length? `<ul class="kids">`+kids.map(k=>`<li><span class="dot ${k.status}"></span><span>${esc(k.id)} ${esc(k.title)} <span style="color:var(--muted)">· ${k.status==="done"?"done":"ETA "+fm(k.eta_minutes)}${over(k)?" ⚠":""}</span></span></li>`).join("")+`</ul>`:"";
+  const kd = kids.length? `<ul class="kids">`+kids.map(k=>`<li onclick="event.stopPropagation();openT('${k.id}')" style="cursor:pointer" title="Open ${esc(k.id)}"><span class="dot ${k.status}"></span><span>${esc(k.id)} ${esc(k.title)} <span style="color:var(--muted)">· ${k.status==="done"?"done":"ETA "+fm(k.eta_minutes)}${over(k)?" ⚠":""}</span></span></li>`).join("")+`</ul>`:"";
   const par = t.parent&&byId[t.parent] ? `<div class="sub">↳ part of ${esc(t.parent)} ${esc(byId[t.parent].title)}</div>`:"";
   return `<div class="card s-${t.status}" onclick="openT('${t.id}')">
     <div class="top"><span>${esc(t.id)} · ${esc(t.priority||"")}</span><span>${L[t.status]}</span></div>
