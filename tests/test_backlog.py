@@ -89,6 +89,62 @@ class EngineTests(Base):
         self.bl("update", "T-0007", "--session", "s1", "--status", "in_progress")
         self.assertEqual(self.task("T-0006")["status"], "blocked")  # only inbox/ready move
 
+    def _age_schedule(self, tid, minutes_ago):
+        """Pretend the schedule date has passed (without touching updated_at)."""
+        import datetime as dt
+        p = os.path.join(self.root, "tasks", f"{tid}.json")
+        t = self.task(tid)
+        past = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes_ago)
+        t["scheduled_for"] = past.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        t["updated_at"] = (past - dt.timedelta(days=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(t, f)
+
+    def test_schedule_hides_task_and_subtasks_until_date(self):
+        self.bl("add", "--session", "s1", "--title", "rotate creds", "--eta", "10m")
+        self.bl("add", "--session", "s1", "--title", "kid", "--parent", "T-0001")
+        self.bl("add", "--session", "s1", "--title", "today")
+        self.assertEqual(self.bl("claim", "T-0001", "--session", "s1").returncode, 0)
+        r = self.bl("schedule", "T-0001", "--session", "s1", "--in", "2w", "--reason", "after launch")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        t, k = self.task("T-0001"), self.task("T-0002")
+        self.assertTrue(t["scheduled_for"]); self.assertEqual(k["scheduled_for"], t["scheduled_for"])
+        self.assertEqual(t["status"], "ready"); self.assertIsNone(t["claimed_by"])
+        out = self.bl("open", "--session", "s1").stdout.decode()
+        self.assertNotIn("rotate creds", out.split("scheduled for later")[0])
+        self.assertIn("scheduled for later (2", out)
+        self.assertNotIn("rotate creds", self.bl("footer", "--session", "s1").stdout.decode())
+        self.assertIn("T-0001", self.bl("list", "--scheduled").stdout.decode())
+        with open(os.path.join(self.root, "BOARD.md"), encoding="utf-8") as f:
+            self.assertIn("## Scheduled (2)", f.read())
+        # date passes -> back, flagged, until someone touches it
+        self._age_schedule("T-0001", 5)
+        out = self.bl("open", "--session", "s1").stdout.decode()
+        self.assertIn("back from schedule", out); self.assertIn("after launch", out)
+        self.bl("update", "T-0001", "--session", "s1", "--log", "looking")
+        self.assertNotIn("back from schedule", self.bl("open", "--session", "s1").stdout.decode())
+
+    def test_schedule_validation_clear_and_early_claim(self):
+        self.bl("add", "--session", "s1", "--title", "dmca")
+        self.assertNotEqual(self.bl("schedule", "T-0001", "--session", "s1").returncode, 0)
+        self.assertNotEqual(self.bl("schedule", "T-0001", "--session", "s1", "--at", "2001-01-01").returncode, 0)
+        self.assertNotEqual(self.bl("schedule", "T-0001", "--session", "s1", "--at", "next tuesday").returncode, 0)
+        self.assertEqual(self.bl("schedule", "T-0001", "--session", "s1", "--at", "2099-11-15").returncode, 0)
+        self.assertTrue(self.task("T-0001")["scheduled_for"].startswith("2099-11-15"))
+        self.assertEqual(self.bl("schedule", "T-0001", "--session", "s1", "--clear").returncode, 0)
+        self.assertIsNone(self.task("T-0001")["scheduled_for"])
+        self.bl("schedule", "T-0001", "--session", "s1", "--at", "2099-11-15T14:30")
+        self.assertEqual(self.bl("claim", "T-0001", "--session", "s2").returncode, 0)
+        t = self.task("T-0001")
+        self.assertIsNone(t["scheduled_for"]); self.assertEqual(t["status"], "in_progress")
+
+    def test_session_url_reaches_board(self):
+        url = "claude://claude.ai/epitaxy/local_abc"
+        self.bl("session", "--id", "s1", "--label", "Code · x", "--url", url)
+        self.bl("add", "--session", "s1", "--title", "t")
+        with open(os.path.join(self.root, "board.html"), encoding="utf-8") as f:
+            self.assertIn(url, f.read())
+
     def test_concurrent_claims_have_exactly_one_winner(self):
         self.bl("add", "--session", "setup", "--title", "shared")
         for round_ in range(8):

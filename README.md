@@ -12,7 +12,8 @@ Give an assistant a long prompt with five things in it, dig into one of them for
 Still open: T-0044 Draft 2 pricing layouts (In progress, ETA 30m); T-0046 Reply to supplier (Waiting on you)
 ```
 
-- **A live board.** `board.html` groups tasks by area into To do, In progress, Blocked, Waiting on you and Done. Overdue ETAs show in red, and each card shows which session created, worked on and finished it.
+- **A live board.** `board.html` groups tasks by area into To do, In progress, Blocked, Waiting on you, Scheduled and Done. Overdue ETAs show in red, and each card shows which session created, worked on and finished it. When a session records its deep link, each card has an **Open chat ↗** link that takes you straight back to that conversation.
+- **Schedule for later.** Deprioritise a task to a date ("move the DMCA filing to 15 Nov", "push credential rotation 2 weeks") and it leaves your active board and counts. On that date it comes back by itself, marked *back from schedule*, along with the reason it was deferred.
 - **Parallel sessions are safe.** Each task is its own file and every change takes a short per-task lock, so two sessions never overwrite each other or both claim the same work.
 - **Any assistant, any model.** It's a skill for assistants that read skill files, a plain command-line tool for anything that can run a shell command, and an MCP server for everything else.
 
@@ -103,7 +104,7 @@ tests/test_backlog.py                                     stdlib test suite: pyt
 tools/build_dist.py                                       rebuilds dist/session-backlog.zip
 ```
 
-`bl.py` has a small CLI (`init`, `where`, `session`, `batch`, `add`, `claim`, `update`, `done`, `drop`, `list`, `show`, `footer`, `board`, `areas`). See the command reference at the end of `SKILL.md`.
+`bl.py` has a small CLI (`init`, `where`, `session`, `batch`, `add`, `claim`, `update`, `schedule`, `done`, `drop`, `list`, `show`, `footer`, `board`, `areas`). See the command reference at the end of `SKILL.md`.
 
 ## License
 

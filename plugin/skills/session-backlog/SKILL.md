@@ -52,7 +52,11 @@ If no backlog exists yet:
 ## 3. Session identity (once per session)
 
 Pick a stable session id and reuse it on every call:
-- If your platform gives the session a URL or id, use it and pass the URL as `--url`.
+- **Always pass a deep link as `--url` when you can get one.** The board's "Open chat ↗" button uses it to drop the user straight back into this conversation:
+  - Claude Code in the Claude desktop app: call the session tool `get_session` with `"self"` (load `mcp__ccd_session_mgmt__get_session` via tool search if deferred) and pass its `link` (`claude://claude.ai/epitaxy/local_…`).
+  - claude.ai chat (web, desktop or phone): `https://claude.ai/chat/<conversation id>` if you can see it. Claude Code on the web: its `https://claude.ai/code/…` session URL.
+  - Never guess or construct a link you weren't given. No link is better than a wrong one.
+- If you started without a link and get one later, re-run `bl session` with the same id and `--url`.
 - Otherwise: `<surface>-<YYYYMMDD-HHMM>` using the session start time, e.g. `desktop-20261018-1652`, `code-20261018-0910`, `api-20261018-1200`, `sched-20261019-0600`.
 
 ```
@@ -92,6 +96,14 @@ Check `bl list` first, and update an existing task instead of creating a duplica
 
 **E. Close honestly.** Run `bl done <ID> --session <SID> --log "delivered …" --output …` only after you've **verified** the result. A parent task can't close while its sub-tasks are open. To abandon a task, run `bl drop <ID> --session <SID> --reason "…"`. Never delete anything.
 
+**E2. Schedule for later.** When the user deprioritises something to a date ("do the DMCA filing in November", "push credential rotation 2 weeks", "remind me about this next Monday"), don't drop it:
+`bl schedule <ID> --session <SID> --at 2026-11-15 [--reason "…"]`, or use `--in 2w` / `--in 3d`. A bare date means 09:00 local time.
+- The task and its open sub-tasks leave the active columns, counts, overdue list and session prompts, and sit in the board's **Scheduled** column until that time. They then come back by themselves, marked "back from schedule". No background job is needed.
+- Record the user's reason in their words. If the task was in progress, it is released (it is not being worked until it returns).
+- `bl schedule <ID> --session <SID> --clear` brings it back now. Claiming or starting a scheduled task also clears its schedule.
+- When `bl open` shows a "back from schedule" section, tell the user in one line which tasks came back and why they were deferred.
+- `bl list --scheduled` shows what's coming back, soonest first.
+
 **F. Footer.** End every reply that involved work with the one-line output of `bl footer --session <SID> [--exclude <IDs just reported>]`.
 
 ## 5. Areas
@@ -130,7 +142,8 @@ Skip capture only for a one-off question answered fully in the same reply. Captu
 ## 10. The board
 
 `board.html` regenerates on every write and refreshes itself every 30 seconds. It shows:
-- swimlanes by area, with columns To do / In progress / Blocked / Waiting on <owner> / Done
+- swimlanes by area, with columns To do / In progress / Blocked / Waiting on <owner> / Scheduled / Done
+- an "Open chat ↗" link on each card that reopens the session working on it (or the one that scheduled or captured it), when that session registered a `--url`
 - the ETA and countdown on each card, with overdue tasks in red
 - which session created, worked on and completed each task
 - a click-through to the full log and outputs
@@ -144,7 +157,7 @@ Skip capture only for a one-off question answered fully in the same reply. Captu
 
 ## 11. Platform notes
 
-- **MCP clients (any assistant or agent framework).** `scripts/backlog_mcp.py` is a stdlib MCP server over stdio exposing `backlog_session`, `backlog_open`, `backlog_add`, `backlog_claim`, `backlog_update`, `backlog_done`, `backlog_drop`, `backlog_list`, `backlog_show`, `backlog_footer`, `backlog_board`, `backlog_init` and `backlog_where`. Register it with command `python3` (Windows `py`, args `-3 <path>`) and args `<path to backlog_mcp.py>`, optionally with env `BACKLOG_DIR`. It runs the same `bl.py`, so the shell and MCP routes share one backlog.
+- **MCP clients (any assistant or agent framework).** `scripts/backlog_mcp.py` is a stdlib MCP server over stdio exposing `backlog_session`, `backlog_open`, `backlog_add`, `backlog_claim`, `backlog_update`, `backlog_schedule`, `backlog_done`, `backlog_drop`, `backlog_list`, `backlog_show`, `backlog_footer`, `backlog_board`, `backlog_init` and `backlog_where`. Register it with command `python3` (Windows `py`, args `-3 <path>`) and args `<path to backlog_mcp.py>`, optionally with env `BACKLOG_DIR`. It runs the same `bl.py`, so the shell and MCP routes share one backlog.
 - **API-driven agents.** A model called through an API has no access to the user's files by itself. The developer runs the MCP server (or `bl.py` behind their own tool) on the machine that owns the backlog and gives the model those tools. Hosted code sandboxes are temporary, so a backlog there is lost when the sandbox ends; don't keep it there.
 - **Claude desktop / cloud / phone sessions linked to the user's computer** (device tools such as `device_bash`, `device_request_folder_access`, `device_commit_files`; load them via your tool search if they are deferred). The backlog folder or its parent (e.g. `~/Documents`) must be a connected folder; if it isn't, call `device_request_folder_access` once with the reason "to keep your task backlog on this computer". Then run commands through `device_bash` using the connected path (e.g. `python3 $HOME/mnt/Documents/Aapastech-Backlog/bl.py …`). To install `bl.py` through the bridge, stage the file and commit it to the device (`device_commit_files`).
 - **Claude Code / Codex / Cursor / other coding agents** run the engine directly in their shell, per the table in section 1.
@@ -161,9 +174,10 @@ bl batch   --session SID file.json|-                          add many (nested "
 bl add     --session SID --title T --area A --eta 20m [--parent ID] [--status S] [--next N] [--priority P1]
 bl claim   ID --session SID [--eta 20m] [--force]
 bl update  ID --session SID [--status S] [--eta E --eta-reason R] [--next N] [--log L] [--output O] [--area A] [--title T]
+bl schedule ID --session SID (--at YYYY-MM-DD[THH:MM] | --in 2w | --clear) [--reason R]   defer until a date
 bl done    ID --session SID [--log L] [--output O] [--force]
 bl drop    ID --session SID --reason R
-bl list    [--all] [--area A] [--session SID] [--json]
+bl list    [--all] [--area A] [--session SID] [--scheduled] [--json]
 bl show    ID
 bl footer  --session SID [--exclude IDs]
 bl board   [--open]                                            rebuild board.html / BOARD.md; --open shows it in the browser

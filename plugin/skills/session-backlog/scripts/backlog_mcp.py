@@ -18,7 +18,7 @@ If none exists, the backlog_init tool creates #2 and copies bl.py into it.
 """
 import json, os, re, shutil, subprocess, sys, tempfile
 
-VERSION = "3.1.1"
+VERSION = "3.2.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Aapastech-Backlog")
 LEGACY_DIRS = [os.path.join(os.path.expanduser("~"), "Documents", "Claude-Backlog")]
@@ -61,7 +61,7 @@ TOOLS = [
     tool("backlog_session", "Register this session once; returns its open tasks plus unclaimed/stale ones.",
          {"session_id": SID, "label": {"type": "string", "description": "e.g. 'API · pricing page'"},
           "surface": {"type": "string", "description": "e.g. code, desktop, cloud, api, scheduled"},
-          "url": STR}, ["session_id"]),
+          "url": {"type": "string", "description": "Deep link that reopens this chat (e.g. claude://claude.ai/epitaxy/local_..., https://claude.ai/chat/...)"}}, ["session_id"]),
     tool("backlog_open", "Re-read open tasks for this session plus unclaimed ones. Call at the start of every turn.",
          {"session_id": SID}, ["session_id"]),
     tool("backlog_add", "Capture new tasks (with nested children for sub-tasks) before starting work.",
@@ -79,8 +79,15 @@ TOOLS = [
          ["session_id", "id"]),
     tool("backlog_drop", "Abandon a task with a reason (nothing is ever deleted).",
          {"session_id": SID, "id": TID, "reason": STR}, ["session_id", "id", "reason"]),
+    tool("backlog_schedule", "Defer a task (and its open sub-tasks) until a date: it leaves active columns, counts and overdue, "
+         "then returns by itself. Use when the user deprioritises something to a later time. clear=true brings it back now.",
+         {"session_id": SID, "id": TID,
+          "at": {"type": "string", "description": "YYYY-MM-DD (09:00 local) or YYYY-MM-DDTHH:MM local"},
+          "in": {"type": "string", "description": "Relative, e.g. 3d, 2w, 4h"},
+          "reason": STR, "clear": {"type": "boolean"}}, ["session_id", "id"]),
     tool("backlog_list", "List tasks grouped by area; answer 'what is open' from this, not from memory.",
          {"all": {"type": "boolean", "description": "Include done/dropped"}, "area": STR,
+          "scheduled": {"type": "boolean", "description": "Only tasks scheduled for later, soonest first"},
           "session_id": {"type": "string", "description": "Only tasks this session touched"}}),
     tool("backlog_show", "Full JSON of one task including its log.", {"id": TID}, ["id"]),
     tool("backlog_footer", "One-line 'Still open: ...' footer for the end of a reply.",
@@ -193,6 +200,11 @@ def call(name, a):
         for o in a.get("outputs") or []:
             args += ["--output", o]
         return run_bl(root, args)
+    if name == "backlog_schedule":
+        args = ["schedule", a["id"], "--session", sid]
+        opt(args, "--at", a.get("at")); opt(args, "--in", a.get("in")); opt(args, "--reason", a.get("reason"))
+        if a.get("clear"): args.append("--clear")
+        return run_bl(root, args)
     if name == "backlog_done":
         args = ["done", a["id"], "--session", sid]
         opt(args, "--log", a.get("log"))
@@ -204,6 +216,7 @@ def call(name, a):
     if name == "backlog_list":
         args = ["list"]
         if a.get("all"): args.append("--all")
+        if a.get("scheduled"): args.append("--scheduled")
         opt(args, "--area", a.get("area")); opt(args, "--session", a.get("session_id"))
         return run_bl(root, args)
     if name == "backlog_show":

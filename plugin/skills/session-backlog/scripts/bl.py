@@ -12,7 +12,7 @@ Run with:  python3 <backlog>/bl.py <command> ...   (Windows: py -3 <backlog>\bl.
 import argparse, datetime as dt, json, os, re, sys, tempfile, time
 from contextlib import contextmanager
 
-VERSION = "3.1.1"
+VERSION = "3.2.0"
 ENC = "utf-8"
 ROOT = os.environ.get("BACKLOG_DIR") or os.path.dirname(os.path.abspath(__file__))
 TASKS = os.path.join(ROOT, "tasks")
@@ -62,19 +62,38 @@ def parse_iso(s):
     return dt.datetime.fromisoformat(s.replace("Z", "+00:00")) if s else None
 
 def parse_eta(s):
-    """'20m', '2h', '1h30m', '1d', '45' (minutes) -> minutes"""
+    """'20m', '2h', '1h30m', '1d', '2w', '45' (minutes) -> minutes"""
     if s is None:
         return None
     s = str(s).strip().lower()
     if s.isdigit():
         return int(s)
     total, found = 0, False
-    for n, u in re.findall(r"(\d+(?:\.\d+)?)\s*([dhm])", s):
+    for n, u in re.findall(r"(\d+(?:\.\d+)?)\s*([wdhm])", s):
         found = True
-        total += float(n) * {"d": 1440, "h": 60, "m": 1}[u]
+        total += float(n) * {"w": 10080, "d": 1440, "h": 60, "m": 1}[u]
     if not found:
-        sys.exit(f"bad ETA '{s}' - use e.g. 20m, 2h, 1h30m, 1d")
+        sys.exit(f"bad duration '{s}' - use e.g. 20m, 2h, 1h30m, 1d, 2w")
     return int(round(total))
+
+def parse_when(at=None, within=None):
+    """--at 2026-11-15 | 2026-11-15T14:30 (local time; a bare date means 09:00)
+    or an ISO time with Z/offset; --in 3d / 2w -> aware UTC datetime."""
+    if within:
+        return now() + dt.timedelta(minutes=parse_eta(within))
+    s = str(at).strip()
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            s += "T09:00"
+        d = dt.datetime.fromisoformat(s.replace("Z", "+00:00").replace(" ", "T"))
+    except ValueError:
+        sys.exit(f"bad date '{at}' - use YYYY-MM-DD or YYYY-MM-DDTHH:MM (local time)")
+    if d.tzinfo is None:
+        d = d.astimezone()  # naive = this computer's local time
+    return d.astimezone(dt.timezone.utc).replace(microsecond=0)
+
+def local_str(d):
+    return d.astimezone().strftime("%a %d %b %H:%M") if d else "?"
 
 def fmt_min(m):
     if m is None:
@@ -245,6 +264,9 @@ def promote_parents(t, sid):
         seen.add(pid)
         with task_lock(pid):
             p = load(pid)
+            if snoozed(p):
+                unschedule(p, sid, f"sub-task {t['id']} started")
+                save(p, rebuild=False)
             if p["status"] in ("inbox", "ready"):
                 p["status"] = "in_progress"
                 p["started_at"] = p.get("started_at") or iso(now())
@@ -257,15 +279,36 @@ def is_stale(t):
     c = parse_iso(t.get("claimed_at"))
     return c is not None and now() - c > dt.timedelta(hours=STALE_HOURS)
 
+def snoozed(t):
+    """Scheduled for later: open, but hidden from active work until scheduled_for."""
+    s = parse_iso(t.get("scheduled_for"))
+    return t["status"] in OPEN and s is not None and s > now()
+
+def returned(t):
+    """Came back from a schedule and nobody has touched it since."""
+    s = parse_iso(t.get("scheduled_for"))
+    u = parse_iso(t.get("updated_at"))
+    return t["status"] in OPEN and s is not None and s <= now() and (u is None or u <= s)
+
 def overdue(t):
     d = parse_iso(t.get("due_at"))
-    return t["status"] in OPEN and d is not None and now() > d
+    return t["status"] in OPEN and not snoozed(t) and d is not None and now() > d
 
 def short(t):
     eta = fmt_min(t.get("eta_minutes"))
     flag = " OVERDUE" if overdue(t) else ""
     owner = f" @{t['claimed_by']}" if t.get("claimed_by") else ""
-    return f"{t['id']} [{LABEL[t['status']]}] ({t['area']}) {t['title']} - ETA {eta}{flag}{owner}"
+    when = ""
+    if snoozed(t):
+        when = f" [scheduled -> {local_str(parse_iso(t['scheduled_for']))}]"
+    elif returned(t):
+        when = " [back from schedule]"
+    return f"{t['id']} [{LABEL[t['status']]}] ({t['area']}) {t['title']} - ETA {eta}{flag}{owner}{when}"
+
+def unschedule(t, sid, why):
+    if t.get("scheduled_for"):
+        t["scheduled_for"] = None
+        log(t, sid, f"schedule cleared ({why})")
 
 
 # ---------- commands ----------
@@ -280,6 +323,7 @@ def cmd_session(a):
     s.setdefault("first_seen", iso(now()))
     s["last_seen"] = iso(now())
     write_json(p, s)
+    build_board()  # labels and chat links live on the board
     print(f"session {a.id} registered")
     open_for(a.id)
 
@@ -375,6 +419,8 @@ def _update(a):
         if a.status != t["status"]:
             changed.append(f"{t['status']} -> {a.status}")
             t["status"] = a.status
+            if a.status == "in_progress" and snoozed(t):
+                unschedule(t, a.session, "started early")
             if a.status == "in_progress" and not t.get("started_at"):
                 t["started_at"] = iso(now())
                 t["claimed_by"], t["claimed_at"] = a.session, iso(now())
@@ -406,6 +452,8 @@ def _claim(a):
         sys.exit(f"CLAIMED by {cur} at {t['claimed_at']} (not stale). Pick another task or use --force with the user's OK.")
     if cur and cur != a.session:
         log(t, a.session, f"took over from {cur}" + (" (stale)" if is_stale(t) else " (forced)"))
+    if snoozed(t):
+        unschedule(t, a.session, "claimed early")
     t["claimed_by"], t["claimed_at"] = a.session, iso(now())
     t["status"] = "in_progress"
     t["started_at"] = t.get("started_at") or iso(now())
@@ -454,6 +502,50 @@ def cmd_drop(a):
     build_board()
     print(short(t))
 
+def cmd_schedule(a):
+    """Defer a task (and its open sub-tasks) until a date; it leaves the active
+    columns, counts, overdue list and session prompts, then returns by itself."""
+    touch_session(a.session)
+    if not a.clear and not (a.at or getattr(a, "in")):
+        sys.exit("give --at DATE, --in 3d/2w, or --clear")
+    root = load(a.id)
+    ids = [root["id"]] + [k["id"] for k in descendants(root["id"]) if k["status"] in OPEN]
+    when = None if a.clear else parse_when(a.at, getattr(a, "in"))
+    if when is not None and when <= now():
+        sys.exit("that time is already past - pick a future date")
+    for tid in ids:
+        with task_lock(tid):
+            t = load(tid)
+            if t["status"] not in OPEN:
+                if tid == root["id"]:
+                    sys.exit(f"{tid} is {t['status']} - nothing to schedule")
+                continue
+            if a.clear:
+                unschedule(t, a.session, a.reason or "back to active now")
+                set_eta(t, t.get("eta_minutes") or 30, a.session)
+            else:
+                if t["status"] == "in_progress":
+                    t["status"] = "ready"
+                    t["claimed_by"] = t["claimed_at"] = None
+                t["scheduled_for"], t["scheduled_by"] = iso(when), a.session
+                t["schedule_reason"] = a.reason or ""
+                t["due_at"] = iso(when + dt.timedelta(minutes=t.get("eta_minutes") or 30))
+                log(t, a.session, f"scheduled until {local_str(when)}"
+                    + (f" ({a.reason})" if a.reason else "") + (f" with {root['id']}" if tid != root["id"] else ""))
+            save(t, rebuild=False)
+    build_board()
+    for tid in ids:
+        print(short(load(tid)))
+
+def descendants(tid):
+    ts = all_tasks()
+    out, frontier = [], [tid]
+    while frontier:
+        kids = [k for k in ts if k.get("parent") in frontier and k not in out]
+        out += kids
+        frontier = [k["id"] for k in kids]
+    return out
+
 def cmd_show(a):
     t = load(a.id)
     print(json.dumps(t, indent=2, ensure_ascii=False))
@@ -463,6 +555,7 @@ def filt(a):
     if not a.all: ts = [t for t in ts if t["status"] in OPEN]
     if a.area: ts = [t for t in ts if t["area"].lower() == a.area.lower()]
     if a.session: ts = [t for t in ts if a.session in (t.get("created_by"), t.get("claimed_by"), t.get("completed_by"))]
+    if getattr(a, "scheduled", False): ts = sorted((t for t in ts if snoozed(t)), key=lambda t: t["scheduled_for"])
     return ts
 
 def cmd_list(a):
@@ -483,20 +576,28 @@ def cmd_list(a):
             if r.get("next_action") and r["status"] in OPEN: print(f"       next: {r['next_action']}")
 
 def open_for(sid):
-    ts = [t for t in all_tasks() if t["status"] in OPEN]
+    allopen = [t for t in all_tasks() if t["status"] in OPEN]
+    later = [t for t in allopen if snoozed(t)]
+    ts = [t for t in allopen if not snoozed(t)]
+    back = [t for t in ts if returned(t)]
+    if back:
+        print(f"--- back from schedule, tell the user ({len(back)}) ---")
+        for t in back: print("  " + short(t) + (f"  | why deferred: {t['schedule_reason']}" if t.get("schedule_reason") else ""))
     mine = [t for t in ts if sid in (t.get("created_by"), t.get("claimed_by"))]
     other = [t for t in ts if t not in mine and not (t.get("claimed_by") and not is_stale(t))]
     print(f"--- open in this session ({len(mine)}) ---")
     for t in mine: print("  " + short(t) + (f"  | next: {t['next_action']}" if t.get("next_action") else ""))
     print(f"--- unclaimed/stale elsewhere ({len(other)}) ---")
     for t in other[:25]: print("  " + short(t))
+    if later:
+        print(f"--- scheduled for later ({len(later)}, hidden until then; bl list --scheduled) ---")
 
 def cmd_open(a):
     open_for(a.session)
 
 def cmd_footer(a):
     """One-line 'still open' footer for the end of a reply."""
-    ts = [t for t in all_tasks() if t["status"] in OPEN and a.session in (t.get("created_by"), t.get("claimed_by"))]
+    ts = [t for t in all_tasks() if t["status"] in OPEN and not snoozed(t) and a.session in (t.get("created_by"), t.get("claimed_by"))]
     if a.exclude: ts = [t for t in ts if t["id"] not in a.exclude]
     if not ts:
         print("Backlog: nothing else open in this session."); return
@@ -535,13 +636,19 @@ def _build_board():
     sess = all_sessions()
     # BOARD.md
     lines = [f"# {TITLE}  (generated {iso(now())})", ""]
+    later = sorted((t for t in ts if snoozed(t)), key=lambda t: t["scheduled_for"])
     for st in STATUSES:
-        group = [t for t in ts if t["status"] == st]
+        group = [t for t in ts if t["status"] == st and t not in later]
         if st in ("done", "dropped"): group = group[-30:]
         if not group: continue
         lines.append(f"## {LABEL[st]} ({len(group)})")
         for t in group:
             lines.append(f"- {short(t)}  | by {t.get('created_by')}" + (f" | done by {t.get('completed_by')}" if t.get('completed_by') else ""))
+        lines.append("")
+    if later:
+        lines.append(f"## Scheduled ({len(later)})")
+        for t in later:
+            lines.append(f"- {short(t)}" + (f"  | why: {t['schedule_reason']}" if t.get("schedule_reason") else ""))
         lines.append("")
     write_text(os.path.join(ROOT, "BOARD.md"), "\n".join(lines))
     # board.html
@@ -634,10 +741,19 @@ def main():
     s = sp.add_parser("drop"); s.add_argument("id"); s.add_argument("--session", required=True)
     s.add_argument("--reason", required=True); s.set_defaults(f=cmd_drop)
 
+    s = sp.add_parser("schedule", help="defer a task (and its open sub-tasks) until a date")
+    s.add_argument("id"); s.add_argument("--session", required=True)
+    s.add_argument("--at", help="YYYY-MM-DD (09:00 local) or YYYY-MM-DDTHH:MM local")
+    s.add_argument("--in", help="e.g. 3d, 2w, 4h")
+    s.add_argument("--reason", default=""); s.add_argument("--clear", action="store_true", help="bring it back now")
+    s.set_defaults(f=cmd_schedule)
+
     s = sp.add_parser("show"); s.add_argument("id"); s.set_defaults(f=cmd_show)
 
     s = sp.add_parser("list"); s.add_argument("--all", action="store_true"); s.add_argument("--area")
-    s.add_argument("--session"); s.add_argument("--json", action="store_true"); s.set_defaults(f=cmd_list)
+    s.add_argument("--session"); s.add_argument("--json", action="store_true")
+    s.add_argument("--scheduled", action="store_true", help="only tasks scheduled for later, soonest first")
+    s.set_defaults(f=cmd_list)
 
     s = sp.add_parser("open"); s.add_argument("--session", required=True); s.set_defaults(f=cmd_open)
     s = sp.add_parser("footer"); s.add_argument("--session", required=True); s.add_argument("--exclude", nargs="*")
@@ -692,7 +808,7 @@ main{padding:16px 20px 60px}
 .lane{margin-bottom:22px}
 .lane h2{font-size:14px;margin:0 0 8px;display:flex;gap:8px;align-items:center}
 .lane h2 .n{font-weight:400;color:var(--muted);font-size:12px}
-.cols{display:grid;grid-template-columns:repeat(5,minmax(200px,1fr));gap:10px;overflow-x:auto}
+.cols{display:grid;grid-template-columns:repeat(6,minmax(190px,1fr));gap:10px;overflow-x:auto}
 .col{background:var(--chip);border-radius:10px;padding:8px;min-height:60px}
 .col h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:2px 4px 8px}
 .card{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;cursor:pointer}
@@ -714,6 +830,11 @@ main{padding:16px 20px 60px}
 .who{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .who span{background:var(--chip);border-radius:5px;padding:1px 6px;font-size:11px;color:var(--muted)}
 .who span.c{color:var(--ok)}
+.who a.chat{background:var(--chip);border-radius:5px;padding:1px 6px;font-size:11px;color:var(--accent);text-decoration:none}
+.who a.chat:hover{text-decoration:underline}
+.when{display:inline-block;margin-top:4px;font-size:11px;border-radius:5px;padding:1px 6px;background:var(--chip);color:var(--wait)}
+.when.back{color:var(--accent)}
+.card.snz{opacity:.82}
 details.res{margin-top:6px;border-top:1px dashed var(--line);padding-top:4px;font-size:12px}
 details.res summary{cursor:pointer;color:var(--muted);list-style:none;user-select:none}
 details.res summary::-webkit-details-marker{display:none}
@@ -738,7 +859,7 @@ dialog td:first-child{color:var(--muted);width:130px}
 a{color:var(--accent)}
 button{background:var(--chip);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 12px;font:inherit;cursor:pointer}
 .empty{color:var(--muted);padding:40px;text-align:center}
-@media (max-width:700px){header{padding:12px 16px}main{padding:12px 16px}.cols{grid-template-columns:repeat(5,78vw)}}
+@media (max-width:700px){header{padding:12px 16px}main{padding:12px 16px}.cols{grid-template-columns:repeat(6,78vw)}}
 </style>
 </head>
 <body>
@@ -759,22 +880,32 @@ button{background:var(--chip);color:var(--ink);border:1px solid var(--line);bord
 const D = /*__DATA__*/null;
 document.title = D.title || "Backlog"; document.getElementById("ttl").textContent = D.title || "Backlog";
 const L = D.labels, S = D.sessions;
-const COLS = [["inbox","ready"],["in_progress"],["blocked"],["waiting_user"],["done","dropped"]];
-const COLNAME = ["To do","In progress","Blocked",L.waiting_user,"Done"];
+const COLS = [["inbox","ready"],["in_progress"],["blocked"],["waiting_user"],[],["done","dropped"]];
+const COLNAME = ["To do","In progress","Blocked",L.waiting_user,"Scheduled","Done"];
+const SCHED_COL = 4;
 const OPEN = new Set(["inbox","ready","in_progress","blocked","waiting_user"]);
 const now = Date.now();
 const byId = Object.fromEntries(D.tasks.map(t=>[t.id,t]));
 const esc = s => String(s ?? "").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const sl = id => { if(!id) return ""; const s=S[id]; return s ? (s.label||id) : id; };
-const slink = id => { if(!id) return "—"; const s=S[id]; const lab=esc(sl(id)); return s&&s.url?`<a href="${esc(s.url)}" target="_blank">${lab}</a>`:lab; };
+// http(s) links open a tab; app links (claude://...) hand off to the app, so no target
+const tgt = u => /^https?:/i.test(u) ? ' target="_blank"' : "";
+const surl = id => id && S[id] && S[id].url ? S[id].url : null;
+const slink = id => { if(!id) return "—"; const u=surl(id); const lab=esc(sl(id)); return u?`<a href="${esc(u)}"${tgt(u)}>${lab} ↗</a>`:lab; };
+// the chat to jump back into: whoever is working it, else whoever deferred it, else whoever captured it
+const chatOf = t => [OPEN.has(t.status)?t.claimed_by:t.completed_by, t.scheduled_by, t.created_by].find(surl);
 const fm = m => m==null?"?":m<60?m+"m":m<1440?(Math.floor(m/60)+"h"+(m%60?String(m%60).padStart(2,"0")+"m":"")):(Math.floor(m/1440)+"d");
-const over = t => OPEN.has(t.status) && t.due_at && Date.parse(t.due_at) < now;
+const snz = t => OPEN.has(t.status) && t.scheduled_for && Date.parse(t.scheduled_for) > now;
+const back = t => OPEN.has(t.status) && t.scheduled_for && Date.parse(t.scheduled_for) <= now && (!t.updated_at || Date.parse(t.updated_at) <= Date.parse(t.scheduled_for));
+const over = t => OPEN.has(t.status) && !snz(t) && t.due_at && Date.parse(t.due_at) < now;
+const colOf = t => snz(t) ? SCHED_COL : COLS.findIndex(c=>c.includes(t.status));
 const rel = iso => { if(!iso) return ""; const d=(Date.parse(iso)-now)/60000; const a=Math.abs(Math.round(d)); return d>=0?"in "+fm(a):fm(a)+" ago"; };
 const local = iso => iso? new Date(iso).toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
 
 function etaHtml(t){
   if(t.status==="done") return `<span class="eta">done in ${fm(t.actual_minutes)}</span> <span>(ETA ${fm(t.eta_minutes)})</span>`;
   if(t.status==="dropped") return "dropped";
+  if(snz(t)) return `<span class="eta">ETA ${fm(t.eta_minutes)}</span> · back ${rel(t.scheduled_for)}`;
   const o = over(t);
   return `<span class="eta ${o?"over":""}">ETA ${fm(t.eta_minutes)}</span> · ${o?"overdue "+rel(t.due_at).replace(" ago",""):"due "+rel(t.due_at)}`;
 }
@@ -797,18 +928,19 @@ function render(){
      && (!fq||(t.id+" "+t.title+" "+(t.next_action||"")).toLowerCase().includes(fq))
      && (sd||OPEN.has(t.status));
   const vis = D.tasks.filter(match);
-  const open=D.tasks.filter(t=>OPEN.has(t.status));
+  const later=D.tasks.filter(snz);
+  const open=D.tasks.filter(t=>OPEN.has(t.status)&&!snz(t));
   document.getElementById("stats").innerHTML =
     `<div class="stat"><b>${open.length}</b>open</div>`+
     `<div class="stat"><b>${open.filter(t=>t.status==="in_progress").length}</b>in progress</div>`+
     `<div class="stat"><b>${open.filter(t=>t.status==="waiting_user").length}</b>waiting on you</div>`+
     `<div class="stat bad"><b>${open.filter(over).length}</b>overdue</div>`+
+    `<div class="stat"><b>${later.length}</b>scheduled</div>`+
     `<div class="stat"><b>${D.tasks.filter(t=>t.status==="done"&&t.completed_at&&now-Date.parse(t.completed_at)<864e5).length}</b>done today</div>`;
   document.getElementById("gen").textContent = "Updated "+local(D.generated)+" · auto-refreshes every 30s";
   const visIds=new Set(vis.map(t=>t.id));
   // a card is a top-level task, or a sub-task whose parent is hidden or sits in a different column
   // (an in-progress sub-task of a To-do parent must show under In progress, or the counts look wrong)
-  const colOf = t => COLS.findIndex(c=>c.includes(t.status));
   const roots = vis.filter(t=>!t.parent || !visIds.has(t.parent) || colOf(t)!==colOf(byId[t.parent]));
   const lanes={}; roots.forEach(t=>(lanes[t.area]??=[]).push(t));
   const m=document.getElementById("main");
@@ -817,25 +949,28 @@ function render(){
     const ts=lanes[ar];
     return `<section class="lane"><h2>${esc(ar)} <span class="n">${ts.length} task${ts.length>1?"s":""}</span></h2><div class="cols">`+
       COLS.map((st,i)=>`<div class="col"><h3>${COLNAME[i]}</h3>`+
-        ts.filter(t=>st.includes(t.status)).sort((a,b)=>(a.priority||"").localeCompare(b.priority||"")||a.id.localeCompare(b.id)).map(card).join("")+`</div>`).join("")+
+        ts.filter(t=>colOf(t)===i).sort(i===SCHED_COL
+          ? (a,b)=>a.scheduled_for.localeCompare(b.scheduled_for)
+          : (a,b)=>(back(b)-back(a))||(a.priority||"").localeCompare(b.priority||"")||a.id.localeCompare(b.id)).map(card).join("")+`</div>`).join("")+
       `</div></section>`;
   }).join("");
 }
 // ---- resources: every link / local file a task mentions, reachable from the card ----
-const RX = /(https?:\/\/[^\s'"<>)\]]+|file:\/\/[^\s'"<>)\]]+|(?:~|\/Users|\/home|[A-Za-z]:\\)[\/\\][^\s'"<>)\],;|]+)/g;
+const RX = /(https?:\/\/[^\s'"<>)\]]+|claude:\/\/[^\s'"<>)\]]+|file:\/\/[^\s'"<>)\]]+|(?:~|\/Users|\/home|[A-Za-z]:\\)[\/\\][^\s'"<>)\],;|]+)/g;
 const trimP = u => u.replace(/[.,;:]+$/,"");
-const toHref = u => /^(https?|file):/.test(u) ? u
+const toHref = u => /^(https?|file|claude):/.test(u) ? u
   : u.startsWith("~") ? "file://"+encodeURI((D.home||"")+u.slice(1))
   : /^[A-Za-z]:\\/.test(u) ? "file:///"+encodeURI(u.replace(/\\/g,"/"))
   : "file://"+encodeURI(u);
 const label = u => {
+  if(/^claude:/.test(u)) return "Open session ↗";
   let m = u.match(/github\.com\/([^/]+)\/([^/]+)\/(pull|issues|commit)\/([0-9a-f]+)/);
   if(m) return m[3]==="commit" ? `${m[2]}@${m[4].slice(0,7)}` : `${m[2]}#${m[4]}`;
   if(/^file:|^[~\/]|^[A-Za-z]:\\/.test(u)){ const d=decodeURI(u.replace(/^file:\/\//,"")); return "📄 "+d.split(/[\/\\]/).filter(Boolean).slice(-2).join("/"); }
   try{ const x=new URL(u); return x.hostname.replace(/^www\./,"")+(x.pathname.length>1?x.pathname.slice(0,40):""); }catch(e){ return u.slice(0,60); }
 };
 const linkify = txt => { const s=String(txt??""); let out="", last=0;
-  s.replace(RX,(m,_g,off)=>{ const u=trimP(m); out+=esc(s.slice(last,off))+`<a class="lnk" href="${esc(toHref(u))}" target="_blank" onclick="event.stopPropagation()">${esc(label(u))}</a>`; last=off+u.length; return m; });
+  s.replace(RX,(m,_g,off)=>{ const u=trimP(m); out+=esc(s.slice(last,off))+`<a class="lnk" href="${esc(toHref(u))}"${tgt(toHref(u))} onclick="event.stopPropagation()">${esc(label(u))}</a>`; last=off+u.length; return m; });
   return out+esc(s.slice(last)); };
 function resources(t){
   const seen=new Set(), list=[];
@@ -856,7 +991,7 @@ function subBlock(t){
   let n=0;
   const html=subs.map(([k,depth])=>{
     const r=resources(k); n+=r.length;
-    const links=r.map(([h,l,raw])=>h?`<a class="lnk" href="${esc(h)}" target="_blank" title="${esc(raw)}" onclick="event.stopPropagation()">${esc(l)}</a>`:esc(l)).join(" · ");
+    const links=r.map(([h,l,raw])=>h?`<a class="lnk" href="${esc(h)}"${tgt(h)} title="${esc(raw)}" onclick="event.stopPropagation()">${esc(l)}</a>`:esc(l)).join(" · ");
     return `<div class="sub-r" style="margin-left:${(depth-1)*10}px"><a href="#" class="lnk" onclick="event.preventDefault();event.stopPropagation();openT('${k.id}')">${esc(k.id)}</a> ${esc(k.title)} <span class="lg">(${esc(L[k.status])})</span>
       ${k.next_action?`<div class="lg">Next: ${linkify(k.next_action)}</div>`:""}${links?`<div>${links}</div>`:""}</div>`;
   }).join("");
@@ -866,7 +1001,7 @@ function resBlock(t){
   const res=resources(t), logs=(t.log||[]).slice(-3).reverse();
   const [subs, subLinks]=subBlock(t);
   if(!res.length && !logs.length && !t.source && !subs) return "";
-  const li=res.map(([h,l,raw])=>h?`<li><a class="lnk" href="${esc(h)}" target="_blank" title="${esc(raw)}" onclick="event.stopPropagation()">${esc(l)}</a></li>`:`<li>${esc(l)}</li>`).join("");
+  const li=res.map(([h,l,raw])=>h?`<li><a class="lnk" href="${esc(h)}"${tgt(h)} title="${esc(raw)}" onclick="event.stopPropagation()">${esc(l)}</a></li>`:`<li>${esc(l)}</li>`).join("");
   return `<details class="res" onclick="event.stopPropagation()"><summary>Details${res.length+subLinks?` · ${res.length+subLinks} link${res.length+subLinks>1?"s":""}`:""}</summary><div class="rs">
     ${li?`<div><div class="lbl">Links &amp; files</div><ul>${li}</ul></div>`:""}
     ${t.next_action&&OPEN.has(t.status)?`<div><div class="lbl">Next</div>${linkify(t.next_action)}</div>`:""}
@@ -877,28 +1012,33 @@ function resBlock(t){
 }
 function card(t){
   const kids=D.tasks.filter(k=>k.parent===t.id);
-  const kd = kids.length? `<ul class="kids">`+kids.map(k=>`<li onclick="event.stopPropagation();openT('${k.id}')" style="cursor:pointer" title="Open ${esc(k.id)}"><span class="dot ${k.status}"></span><span>${esc(k.id)} ${esc(k.title)} <span style="color:var(--muted)">· ${k.status==="done"?"done":"ETA "+fm(k.eta_minutes)}${over(k)?" ⚠":""}</span></span></li>`).join("")+`</ul>`:"";
+  const kd = kids.length? `<ul class="kids">`+kids.map(k=>`<li onclick="event.stopPropagation();openT('${k.id}')" style="cursor:pointer" title="Open ${esc(k.id)}"><span class="dot ${k.status}"></span><span>${esc(k.id)} ${esc(k.title)} <span style="color:var(--muted)">· ${k.status==="done"?"done":snz(k)?"scheduled "+local(k.scheduled_for):"ETA "+fm(k.eta_minutes)}${over(k)?" ⚠":""}</span></span></li>`).join("")+`</ul>`:"";
   const par = t.parent&&byId[t.parent] ? `<div class="sub">↳ part of ${esc(t.parent)} ${esc(byId[t.parent].title)}</div>`:"";
-  return `<div class="card s-${t.status}" onclick="openT('${t.id}')">
+  const when = snz(t) ? `<div class="when" title="${esc(t.schedule_reason||"")}">⏰ back ${esc(local(t.scheduled_for))}${t.schedule_reason?" · "+esc(t.schedule_reason):""}</div>`
+    : back(t) ? `<div class="when back">↻ back from schedule${t.schedule_reason?" · was deferred: "+esc(t.schedule_reason):""}</div>` : "";
+  const cu = surl(chatOf(t));
+  const chat = cu ? `<a class="chat" href="${esc(cu)}"${tgt(cu)} onclick="event.stopPropagation()" title="Open ${esc(sl(chatOf(t)))}">Open chat ↗</a>` : "";
+  return `<div class="card s-${t.status}${snz(t)?" snz":""}" onclick="openT('${t.id}')">
     <div class="top"><span>${esc(t.id)} · ${esc(t.priority||"")}</span><span>${L[t.status]}</span></div>
-    <div class="title">${esc(t.title)}</div>${par}
+    <div class="title">${esc(t.title)}</div>${par}${when}
     <div class="sub">${etaHtml(t)}</div>
     ${t.next_action&&OPEN.has(t.status)?`<div class="sub">Next: ${linkify(t.next_action)}</div>`:""}
     ${kd}
     ${resBlock(t)}
-    <div class="who"><span>created by ${esc(sl(t.created_by))}</span>${t.claimed_by&&OPEN.has(t.status)?`<span>worked by ${esc(sl(t.claimed_by))}</span>`:""}${t.completed_by?`<span class="c">completed by ${esc(sl(t.completed_by))}</span>`:""}</div>
+    <div class="who"><span>created by ${esc(sl(t.created_by))}</span>${t.claimed_by&&OPEN.has(t.status)?`<span>worked by ${esc(sl(t.claimed_by))}</span>`:""}${t.completed_by?`<span class="c">completed by ${esc(sl(t.completed_by))}</span>`:""}${chat}</div>
   </div>`;
 }
 function openT(id){
   const t=byId[id]; const d=document.getElementById("dlg");
   const row=(k,v)=>`<tr><td>${k}</td><td>${v}</td></tr>`;
   d.innerHTML=`<h2>${esc(t.id)} · ${esc(t.title)}</h2><div style="color:var(--muted);font-size:13px">${esc(t.area)} · ${L[t.status]} · ${esc(t.priority||"")}</div>
-  <table>${row("ETA",etaHtml(t))}${row("Due",local(t.due_at))}${row("Next action",linkify(t.next_action)||"—")}
+  <table>${row("ETA",etaHtml(t))}${row("Due",local(t.due_at))}
+  ${t.scheduled_for?row(snz(t)?"Scheduled":"Was scheduled",local(t.scheduled_for)+" by "+slink(t.scheduled_by)+(t.schedule_reason?" — "+esc(t.schedule_reason):"")):""}${row("Next action",linkify(t.next_action)||"—")}
   ${row("Parent",t.parent?esc(t.parent+" "+(byId[t.parent]?.title||"")):"—")}
   ${row("Created",local(t.created_at)+" by "+slink(t.created_by))}
   ${row("Worked by",slink(t.claimed_by))}${row("Completed",t.completed_at?local(t.completed_at)+" by "+slink(t.completed_by):"—")}
   ${row("Source",linkify(t.source)||"—")}
-  ${row("Links & files",resources(t).map(([h,l,raw])=>h?`<a class="lnk" href="${esc(h)}" target="_blank">${esc(raw)}</a>`:esc(l)).join("<br>")||"—")}</table>
+  ${row("Links & files",resources(t).map(([h,l,raw])=>h?`<a class="lnk" href="${esc(h)}"${tgt(h)}>${esc(raw)}</a>`:esc(l)).join("<br>")||"—")}</table>
   <div class="log">${(t.log||[]).slice().reverse().map(e=>`<div><time>${local(e.at)}</time><b>${esc(sl(e.session))}</b> — ${linkify(e.msg)}</div>`).join("")}</div>
   <p style="text-align:right;margin:12px 0 0"><button onclick="dlg.close()">Close</button></p>`;
   d.showModal();

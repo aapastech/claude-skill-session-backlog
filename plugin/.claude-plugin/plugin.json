@@ -1,7 +1,7 @@
 {
   "name": "session-backlog",
   "displayName": "Aapastech Session Backlog",
-  "version": "3.1.1",
+  "version": "3.2.0",
   "description": "Stops AI assistants forgetting tasks in long or parallel sessions: every task and sub-task goes into a backlog on your own computer, with area, ETA and session, re-read every turn, with a live board. Works as a skill, a CLI and an MCP server.",
   "author": {
     "name": "Shikha Gupta",
