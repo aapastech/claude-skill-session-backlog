@@ -72,6 +72,23 @@ class EngineTests(Base):
         self.assertEqual(self.bl("add", "--session", "s1", "--title", "ok").returncode, 0)
         self.assertEqual(self.task_files(), ["T-0001.json"])
 
+    def test_sub_task_in_progress_promotes_ready_parents(self):
+        self.bl("add", "--session", "s1", "--title", "epic")
+        self.bl("add", "--session", "s1", "--title", "story", "--parent", "T-0001")
+        self.bl("add", "--session", "s1", "--title", "step", "--parent", "T-0002")
+        self.assertEqual(self.bl("claim", "T-0003", "--session", "s2").returncode, 0)
+        for tid in ("T-0001", "T-0002"):
+            p = self.task(tid)
+            self.assertEqual(p["status"], "in_progress")
+            self.assertIsNone(p["claimed_by"])
+        self.bl("add", "--session", "s1", "--title", "other epic")
+        self.bl("add", "--session", "s1", "--title", "kid", "--parent", "T-0004", "--status", "in_progress")
+        self.assertEqual(self.task("T-0004")["status"], "in_progress")
+        self.bl("add", "--session", "s1", "--title", "third", "--status", "blocked")
+        self.bl("add", "--session", "s1", "--title", "kid2", "--parent", "T-0006")
+        self.bl("update", "T-0007", "--session", "s1", "--status", "in_progress")
+        self.assertEqual(self.task("T-0006")["status"], "blocked")  # only inbox/ready move
+
     def test_concurrent_claims_have_exactly_one_winner(self):
         self.bl("add", "--session", "setup", "--title", "shared")
         for round_ in range(8):

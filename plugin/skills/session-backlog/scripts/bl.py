@@ -12,7 +12,7 @@ Run with:  python3 <backlog>/bl.py <command> ...   (Windows: py -3 <backlog>\bl.
 import argparse, datetime as dt, json, os, re, sys, tempfile, time
 from contextlib import contextmanager
 
-VERSION = "3.1.0"
+VERSION = "3.1.1"
 ENC = "utf-8"
 ROOT = os.environ.get("BACKLOG_DIR") or os.path.dirname(os.path.abspath(__file__))
 TASKS = os.path.join(ROOT, "tasks")
@@ -236,6 +236,23 @@ def save(t, rebuild=True):
     if rebuild:
         build_board()
 
+def promote_parents(t, sid):
+    """A sub-task in progress means its parent is in progress too: move any
+    inbox/ready ancestor to in_progress (started, not claimed - the session
+    owns the sub-task, not the whole parent)."""
+    seen, pid = {t["id"]}, t.get("parent")
+    while pid and pid not in seen:
+        seen.add(pid)
+        with task_lock(pid):
+            p = load(pid)
+            if p["status"] in ("inbox", "ready"):
+                p["status"] = "in_progress"
+                p["started_at"] = p.get("started_at") or iso(now())
+                set_eta(p, p.get("eta_minutes") or 30, sid)
+                log(p, sid, f"in progress: sub-task {t['id']} started")
+                save(p, rebuild=False)
+        pid = p.get("parent")
+
 def is_stale(t):
     c = parse_iso(t.get("claimed_at"))
     return c is not None and now() - c > dt.timedelta(hours=STALE_HOURS)
@@ -305,6 +322,8 @@ def _fill_task(tid, d, sid, status, eta, par):
         t["claimed_by"], t["claimed_at"], t["started_at"] = sid, iso(now()), iso(now())
         set_eta(t, t["eta_minutes"], sid)
     save(t, rebuild=False)
+    if status == "in_progress":
+        promote_parents(t, sid)
     return t
 
 def cmd_add(a):
@@ -338,6 +357,8 @@ def cmd_update(a):
     touch_session(a.session)
     with task_lock(a.id):
         t = _update(a)
+    if t["status"] == "in_progress":
+        promote_parents(t, a.session)
     build_board()
     print(short(t))
 
@@ -372,6 +393,7 @@ def cmd_claim(a):
     touch_session(a.session)
     with task_lock(a.id):
         t = _claim(a)
+    promote_parents(t, a.session)
     build_board()
     print(short(t))
 
@@ -784,8 +806,10 @@ function render(){
     `<div class="stat"><b>${D.tasks.filter(t=>t.status==="done"&&t.completed_at&&now-Date.parse(t.completed_at)<864e5).length}</b>done today</div>`;
   document.getElementById("gen").textContent = "Updated "+local(D.generated)+" · auto-refreshes every 30s";
   const visIds=new Set(vis.map(t=>t.id));
-  // a card is a top-level task (no parent, or parent not visible); sub-tasks render inside parent card AND own column if parent hidden
-  const roots = vis.filter(t=>!t.parent || !visIds.has(t.parent));
+  // a card is a top-level task, or a sub-task whose parent is hidden or sits in a different column
+  // (an in-progress sub-task of a To-do parent must show under In progress, or the counts look wrong)
+  const colOf = t => COLS.findIndex(c=>c.includes(t.status));
+  const roots = vis.filter(t=>!t.parent || !visIds.has(t.parent) || colOf(t)!==colOf(byId[t.parent]));
   const lanes={}; roots.forEach(t=>(lanes[t.area]??=[]).push(t));
   const m=document.getElementById("main");
   if(!roots.length){ m.innerHTML=`<div class="empty">Nothing here. Tasks appear as soon as an AI session captures them.</div>`; return; }
