@@ -18,7 +18,7 @@ If none exists, the backlog_init tool creates #2 and copies bl.py into it.
 """
 import json, os, re, shutil, subprocess, sys, tempfile
 
-VERSION = "3.3.0"
+VERSION = "3.3.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Aapastech-Backlog")
 LEGACY_DIRS = [os.path.join(os.path.expanduser("~"), "Documents", "Claude-Backlog")]

@@ -158,6 +158,22 @@ class EngineTests(Base):
         self.assertLess(out.index("T-0004"), out.index("T-0003"))  # new tasks surface on top
         self.assertNotEqual(self.bl("order", "--session", "s1", "T-0099").returncode, 0)
 
+    def test_serve_moves_off_a_port_another_program_holds(self):
+        import socket, time
+        blocker = socket.socket(); blocker.bind(("127.0.0.1", 0)); blocker.listen(1)
+        port = blocker.getsockname()[1]
+        e = dict(os.environ, BACKLOG_DIR=self.root)
+        proc = subprocess.Popen([sys.executable, os.path.join(self.root, "bl.py"), "serve", "--port", str(port)],
+                                env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            line = proc.stdout.readline().decode()
+            self.assertIn("board live at http://127.0.0.1:", line)
+            self.assertNotIn(f":{port}/", line)
+            again = self.bl("serve", "--port", str(port)).stdout.decode()  # second run reuses the first
+            self.assertIn("already live", again)
+        finally:
+            proc.terminate(); proc.wait(timeout=10); blocker.close()
+
     def test_serve_saves_order_only_with_token_and_host(self):
         import socket, time, urllib.request, urllib.error
         with socket.socket() as so:

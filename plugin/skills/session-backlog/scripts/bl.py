@@ -12,7 +12,7 @@ Run with:  python3 <backlog>/bl.py <command> ...   (Windows: py -3 <backlog>\bl.
 import argparse, datetime as dt, json, os, re, secrets, sys, tempfile, time
 from contextlib import contextmanager
 
-VERSION = "3.3.0"
+VERSION = "3.3.1"
 ENC = "utf-8"
 ROOT = os.environ.get("BACKLOG_DIR") or os.path.dirname(os.path.abspath(__file__))
 TASKS = os.path.join(ROOT, "tasks")
@@ -634,7 +634,23 @@ def cmd_serve(a):
                 return self._send(400, f"bad request: {e}".encode(ENC))
             self._send(204)
 
-    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    live = serve_info()
+    if live:  # already serving this backlog: reuse it
+        url = f"http://127.0.0.1:{live['port']}/"
+        print(f"board already live at {url}")
+        if a.open:
+            import webbrowser
+            webbrowser.open(url)
+        return
+    srv = None
+    for p_try in ([port] if port == 0 else range(port, port + 20)):
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", p_try), H)
+            break
+        except OSError:
+            continue  # taken by another program: try the next port
+    if srv is None:
+        sys.exit(f"ports {port}-{port + 19} are all in use; pass --port N")
     port = srv.server_address[1]
     hosts.update({f"127.0.0.1:{port}", f"localhost:{port}"})
     write_json(os.path.join(ROOT, SERVE_FILE), {"pid": os.getpid(), "port": port})
