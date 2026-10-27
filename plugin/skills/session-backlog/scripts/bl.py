@@ -12,7 +12,7 @@ Run with:  python3 <backlog>/bl.py <command> ...   (Windows: py -3 <backlog>\bl.
 import argparse, datetime as dt, json, os, re, secrets, sys, tempfile, time
 from contextlib import contextmanager
 
-VERSION = "3.3.1"
+VERSION = "3.3.2"
 ENC = "utf-8"
 ROOT = os.environ.get("BACKLOG_DIR") or os.path.dirname(os.path.abspath(__file__))
 TASKS = os.path.join(ROOT, "tasks")
@@ -948,12 +948,14 @@ select,input{background:var(--panel);color:var(--ink);border:1px solid var(--lin
 label.tog{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px}
 .gen{font-size:11px;color:var(--muted);width:100%}
 main{flex:1;min-height:0;overflow:auto;padding:0 20px 60px;overscroll-behavior:contain}
-.lane{margin-bottom:22px;width:max-content;min-width:100%}
+/* lanes fill the viewport; below ~1240px the board scrolls sideways instead of squeezing columns */
+.lane{margin-bottom:22px;min-width:1240px}
 .lane h2{font-size:14px;margin:0;height:40px;display:flex;gap:8px;align-items:center;
   position:sticky;top:0;z-index:4;background:var(--bg)}
 .lane h2 .n{font-weight:400;color:var(--muted);font-size:12px}
 .cols{display:grid;grid-template-columns:repeat(5,minmax(210px,1fr)) minmax(170px,.75fr);gap:10px}
-.col{background:var(--chip);border-radius:10px;padding:0 8px 8px;min-height:60px}
+.col{background:var(--chip);border-radius:10px;padding:0 8px 8px;min-height:60px;min-width:0}
+.card{min-width:0;overflow-wrap:anywhere}
 .col h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 -8px 6px;padding:10px 12px 8px;
   position:sticky;top:40px;z-index:3;background:var(--chip);border-radius:10px 10px 0 0;display:flex;justify-content:space-between}
 .col h3 .k{font-weight:400;letter-spacing:0}
@@ -1018,7 +1020,7 @@ dialog td:first-child{color:var(--muted);width:130px}
 a{color:var(--accent)}
 button{background:var(--chip);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 12px;font:inherit;cursor:pointer}
 .empty{color:var(--muted);padding:40px;text-align:center}
-@media (max-width:700px){header{padding:12px 16px}main{padding:0 16px 40px}.cols{grid-template-columns:repeat(5,78vw) 60vw}}
+@media (max-width:700px){header{padding:12px 16px}main{padding:0 16px 40px}.lane{min-width:0;width:max-content}.cols{grid-template-columns:repeat(5,78vw) 60vw}}
 </style>
 </head>
 <body>
