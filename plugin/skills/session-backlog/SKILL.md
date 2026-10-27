@@ -142,13 +142,17 @@ Skip capture only for a one-off question answered fully in the same reply. Captu
 ## 10. The board
 
 `board.html` regenerates on every write and refreshes itself every 30 seconds. It shows:
-- swimlanes by area, with columns To do / In progress / Blocked / Waiting on <owner> / Scheduled / Done
+- swimlanes by area, with columns To do / In progress / Blocked / Waiting on <owner> / Scheduled / Done; the lane name and column headers stay pinned while scrolling
+- scheduled tasks as small date pills (click for details) so they don't compete for attention
+- drag-to-reorder within a column (the ⠿ grip). Order is the user's priority: within a column, work from the top. New tasks and tasks back from a schedule appear on top until the user places them
 - an "Open chat ↗" link on each card that reopens the session working on it (or the one that scheduled or captured it), when that session registered a `--url`
 - the ETA and countdown on each card, with overdue tasks in red
 - which session created, worked on and completed each task
 - a click-through to the full log and outputs
 
 `BOARD.md` is the same board as text.
+
+**Saving the drag order.** The board file (`file://…/board.html`) can't write to disk, so a drag there is remembered only in that browser. `bl serve` (add `--open` to open it) serves the same board at `http://127.0.0.1:8765/`, reachable only from this computer. Drags there are saved to the tasks, and `bl open`, `bl list` and `BOARD.md` follow the order. When a server is running, `bl board --open` opens it instead of the file. Start it in the background only if the user asks, and say how to stop it. When the user tells you an order ("do X first"), run `bl order --session <SID> T-1 T-2 …` (top to bottom).
 
 **When the user asks to see it** ("show my backlog", "open the board", "what's open?"):
 - On the computer that holds the backlog, run `bl board --open` to open it in their default browser.
@@ -157,7 +161,7 @@ Skip capture only for a one-off question answered fully in the same reply. Captu
 
 ## 11. Platform notes
 
-- **MCP clients (any assistant or agent framework).** `scripts/backlog_mcp.py` is a stdlib MCP server over stdio exposing `backlog_session`, `backlog_open`, `backlog_add`, `backlog_claim`, `backlog_update`, `backlog_schedule`, `backlog_done`, `backlog_drop`, `backlog_list`, `backlog_show`, `backlog_footer`, `backlog_board`, `backlog_init` and `backlog_where`. Register it with command `python3` (Windows `py`, args `-3 <path>`) and args `<path to backlog_mcp.py>`, optionally with env `BACKLOG_DIR`. It runs the same `bl.py`, so the shell and MCP routes share one backlog.
+- **MCP clients (any assistant or agent framework).** `scripts/backlog_mcp.py` is a stdlib MCP server over stdio exposing `backlog_session`, `backlog_open`, `backlog_add`, `backlog_claim`, `backlog_update`, `backlog_schedule`, `backlog_order`, `backlog_done`, `backlog_drop`, `backlog_list`, `backlog_show`, `backlog_footer`, `backlog_board`, `backlog_init` and `backlog_where`. Register it with command `python3` (Windows `py`, args `-3 <path>`) and args `<path to backlog_mcp.py>`, optionally with env `BACKLOG_DIR`. It runs the same `bl.py`, so the shell and MCP routes share one backlog.
 - **API-driven agents.** A model called through an API has no access to the user's files by itself. The developer runs the MCP server (or `bl.py` behind their own tool) on the machine that owns the backlog and gives the model those tools. Hosted code sandboxes are temporary, so a backlog there is lost when the sandbox ends; don't keep it there.
 - **Claude desktop / cloud / phone sessions linked to the user's computer** (device tools such as `device_bash`, `device_request_folder_access`, `device_commit_files`; load them via your tool search if they are deferred). The backlog folder or its parent (e.g. `~/Documents`) must be a connected folder; if it isn't, call `device_request_folder_access` once with the reason "to keep your task backlog on this computer". Then run commands through `device_bash` using the connected path (e.g. `python3 $HOME/mnt/Documents/Aapastech-Backlog/bl.py …`). To install `bl.py` through the bridge, stage the file and commit it to the device (`device_commit_files`).
 - **Claude Code / Codex / Cursor / other coding agents** run the engine directly in their shell, per the table in section 1.
@@ -180,6 +184,8 @@ bl drop    ID --session SID --reason R
 bl list    [--all] [--area A] [--session SID] [--scheduled] [--json]
 bl show    ID
 bl footer  --session SID [--exclude IDs]
-bl board   [--open]                                            rebuild board.html / BOARD.md; --open shows it in the browser
+bl board   [--open]                                            rebuild board.html / BOARD.md; --open shows it (the live server if running)
+bl order   --session SID ID ID …                               order tasks within their column, first = top
+bl serve   [--port 8765] [--open]                              serve the board on 127.0.0.1 so drag-to-reorder saves
 ```
 Statuses: `inbox`, `ready`, `in_progress`, `blocked`, `waiting_user`, `done`, `dropped`. Priorities run from `P0` (urgent) to `P3`; the default is `P2`.

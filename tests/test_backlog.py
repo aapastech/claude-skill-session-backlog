@@ -145,6 +145,52 @@ class EngineTests(Base):
         with open(os.path.join(self.root, "board.html"), encoding="utf-8") as f:
             self.assertIn(url, f.read())
 
+    def test_order_sets_ranks_and_bl_open_follows_it(self):
+        for n in ("a", "b", "c"):
+            self.bl("add", "--session", "s1", "--title", n)
+        self.assertEqual(self.bl("order", "--session", "s1", "T-0003", "T-0001", "T-0002").returncode, 0)
+        self.assertEqual([self.task(i)["rank"] for i in ("T-0003", "T-0001", "T-0002")], [1, 2, 3])
+        out = self.bl("open", "--session", "s1").stdout.decode()
+        self.assertLess(out.index("T-0003"), out.index("T-0001"))
+        self.assertLess(out.index("T-0001"), out.index("T-0002"))
+        self.bl("add", "--session", "s1", "--title", "new P0", "--priority", "P0")
+        out = self.bl("open", "--session", "s1").stdout.decode()
+        self.assertLess(out.index("T-0004"), out.index("T-0003"))  # new tasks surface on top
+        self.assertNotEqual(self.bl("order", "--session", "s1", "T-0099").returncode, 0)
+
+    def test_serve_saves_order_only_with_token_and_host(self):
+        import socket, time, urllib.request, urllib.error
+        with socket.socket() as so:
+            so.bind(("127.0.0.1", 0)); port = so.getsockname()[1]
+        self.bl("add", "--session", "s1", "--title", "a"); self.bl("add", "--session", "s1", "--title", "b")
+        e = dict(os.environ, BACKLOG_DIR=self.root)
+        proc = subprocess.Popen([sys.executable, os.path.join(self.root, "bl.py"), "serve", "--port", str(port)],
+                                env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            base = f"http://127.0.0.1:{port}"
+            for _ in range(50):
+                try:
+                    html = urllib.request.urlopen(base + "/", timeout=1).read().decode(); break
+                except OSError:
+                    time.sleep(0.1)
+            token = _re.search(r'const API = \{"token": "([^"]+)"\}', html).group(1)
+            def post(tok, host=None, ids=("T-0002", "T-0001")):
+                req = urllib.request.Request(base + "/api/order", data=json.dumps({"ids": list(ids)}).encode(),
+                                             method="POST", headers={"Content-Type": "application/json", "X-BL-Token": tok})
+                if host: req.add_header("Host", host)
+                try:
+                    return urllib.request.urlopen(req, timeout=5).status
+                except urllib.error.HTTPError as err:
+                    return err.code
+            self.assertEqual(post("wrong"), 403)
+            self.assertEqual(post(token, host="evil.example"), 403)
+            self.assertEqual(post(token, ids=("../x",)), 400)
+            self.assertEqual(post(token), 204)
+            self.assertEqual((self.task("T-0002")["rank"], self.task("T-0001")["rank"]), (1, 2))
+            self.assertIn(str(port), self.bl("board").stdout.decode())  # board points at the live server
+        finally:
+            proc.terminate(); proc.wait(timeout=10)
+
     def test_concurrent_claims_have_exactly_one_winner(self):
         self.bl("add", "--session", "setup", "--title", "shared")
         for round_ in range(8):

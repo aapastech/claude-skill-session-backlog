@@ -18,7 +18,7 @@ If none exists, the backlog_init tool creates #2 and copies bl.py into it.
 """
 import json, os, re, shutil, subprocess, sys, tempfile
 
-VERSION = "3.2.0"
+VERSION = "3.3.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Aapastech-Backlog")
 LEGACY_DIRS = [os.path.join(os.path.expanduser("~"), "Documents", "Claude-Backlog")]
@@ -85,6 +85,9 @@ TOOLS = [
           "at": {"type": "string", "description": "YYYY-MM-DD (09:00 local) or YYYY-MM-DDTHH:MM local"},
           "in": {"type": "string", "description": "Relative, e.g. 3d, 2w, 4h"},
           "reason": STR, "clear": {"type": "boolean"}}, ["session_id", "id"]),
+    tool("backlog_order", "Set the order of tasks within their board column, first = top (e.g. the user says 'put X first').",
+         {"session_id": SID, "ids": {"type": "array", "items": STR, "description": "Task ids top to bottom"}},
+         ["session_id", "ids"]),
     tool("backlog_list", "List tasks grouped by area; answer 'what is open' from this, not from memory.",
          {"all": {"type": "boolean", "description": "Include done/dropped"}, "area": STR,
           "scheduled": {"type": "boolean", "description": "Only tasks scheduled for later, soonest first"},
@@ -200,6 +203,8 @@ def call(name, a):
         for o in a.get("outputs") or []:
             args += ["--output", o]
         return run_bl(root, args)
+    if name == "backlog_order":
+        return run_bl(root, ["order", "--session", sid] + list(a.get("ids") or []))
     if name == "backlog_schedule":
         args = ["schedule", a["id"], "--session", sid]
         opt(args, "--at", a.get("at")); opt(args, "--in", a.get("in")); opt(args, "--reason", a.get("reason"))

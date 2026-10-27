@@ -9,10 +9,10 @@ Every write regenerates board.html (visual board) and BOARD.md (text board).
 All files are UTF-8 on every OS. Stdlib only, Python 3.8+, macOS / Windows / Linux.
 Run with:  python3 <backlog>/bl.py <command> ...   (Windows: py -3 <backlog>\bl.py ...)
 """
-import argparse, datetime as dt, json, os, re, sys, tempfile, time
+import argparse, datetime as dt, json, os, re, secrets, sys, tempfile, time
 from contextlib import contextmanager
 
-VERSION = "3.2.0"
+VERSION = "3.3.0"
 ENC = "utf-8"
 ROOT = os.environ.get("BACKLOG_DIR") or os.path.dirname(os.path.abspath(__file__))
 TASKS = os.path.join(ROOT, "tasks")
@@ -22,6 +22,7 @@ DEFAULT_AREAS = ["Work", "Clients", "Product", "Marketing", "Admin", "Personal",
 DEFAULT_TITLE = "Aapastech Backlog"
 LOCK_STALE_S = 30     # a lock older than this was left by a crashed process
 LOCK_WAIT_S = 15      # give up waiting for a busy task after this long
+SERVE_FILE = ".serve.json"  # set while `bl serve` runs: {"pid", "port"}
 
 def read_json(path):
     # utf-8-sig also accepts files saved with a BOM (e.g. Windows Notepad)
@@ -305,6 +306,31 @@ def short(t):
         when = " [back from schedule]"
     return f"{t['id']} [{LABEL[t['status']]}] ({t['area']}) {t['title']} - ETA {eta}{flag}{owner}{when}"
 
+PRIO = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+def order_key(t):
+    """Column order everywhere (board, BOARD.md, bl open): tasks back from a
+    schedule first, then new unranked tasks (by priority, so they get noticed),
+    then the order the user dragged on the board (rank)."""
+    r = t.get("rank")
+    return (0 if returned(t) else 1, 0 if r is None else 1, r if r is not None else 0,
+            PRIO.get(t.get("priority"), 9), t["id"])
+
+def set_order(ids, sid):
+    """Rank the given tasks 1..n in this order (the user's drag on the board, or
+    'put X first'). Only these tasks change; ranks compare within a column."""
+    ids = [norm_id(i) for i in ids]
+    for tid in ids:
+        load(tid)  # unknown id -> clear error before anything changes
+    for n, tid in enumerate(ids, 1):
+        with task_lock(tid):
+            t = load(tid)
+            if t.get("rank") != n:
+                t["rank"] = n
+                save(t, rebuild=False)
+    build_board()
+    touch_session(sid)
+
 def unschedule(t, sid, why):
     if t.get("scheduled_for"):
         t["scheduled_for"] = None
@@ -546,6 +572,85 @@ def descendants(tid):
         frontier = [k["id"] for k in kids]
     return out
 
+def cmd_order(a):
+    set_order(a.ids, a.session)
+    for tid in a.ids:
+        print(short(load(tid)))
+
+def serve_info():
+    """{"pid", "port"} of a running `bl serve`, or None."""
+    p = os.path.join(ROOT, SERVE_FILE)
+    try:
+        info = read_json(p)
+        import socket
+        with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=0.5):
+            return info
+    except Exception:
+        return None
+
+def cmd_serve(a):
+    """Serve the board on 127.0.0.1 so drag-to-reorder is saved for every
+    session. Only this computer can reach it; writes need the per-run token
+    baked into the served page, and the Host header must be this server."""
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+    token = secrets.token_urlsafe(24)
+    port = a.port
+    hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *x): pass
+        def _send(self, code, body=b"", ctype="text/plain; charset=utf-8"):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def _ok_host(self):
+            return self.headers.get("Host", "") in hosts
+        def do_GET(self):
+            if not self._ok_host(): return self._send(403, b"forbidden")
+            if self.path.split("?")[0] in ("/", "/board.html"):
+                return self._send(200, board_html({"token": token}).encode(ENC), "text/html; charset=utf-8")
+            self._send(404, b"not found")
+        def do_POST(self):
+            if not self._ok_host() or self.headers.get("X-BL-Token") != token:
+                return self._send(403, b"forbidden")
+            origin = self.headers.get("Origin")
+            if origin and origin.split("//", 1)[-1] not in hosts:
+                return self._send(403, b"forbidden")
+            if self.path != "/api/order":
+                return self._send(404, b"not found")
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(min(n, 1_000_000)).decode(ENC))
+                ids = [str(i) for i in body["ids"]][:500]
+                if not all(re.fullmatch(r"T-\d{1,6}", i) for i in ids):
+                    raise ValueError("bad id")
+                set_order(ids, "board")
+            except SystemExit as e:
+                return self._send(400, str(e).encode(ENC))
+            except Exception as e:
+                return self._send(400, f"bad request: {e}".encode(ENC))
+            self._send(204)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    port = srv.server_address[1]
+    hosts.update({f"127.0.0.1:{port}", f"localhost:{port}"})
+    write_json(os.path.join(ROOT, SERVE_FILE), {"pid": os.getpid(), "port": port})
+    url = f"http://127.0.0.1:{port}/"
+    print(f"board live at {url}  (drag-to-reorder saves for every session; Ctrl+C stops)", flush=True)
+    if a.open:
+        import webbrowser
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try: os.remove(os.path.join(ROOT, SERVE_FILE))
+        except OSError: pass
+
 def cmd_show(a):
     t = load(a.id)
     print(json.dumps(t, indent=2, ensure_ascii=False))
@@ -576,7 +681,7 @@ def cmd_list(a):
             if r.get("next_action") and r["status"] in OPEN: print(f"       next: {r['next_action']}")
 
 def open_for(sid):
-    allopen = [t for t in all_tasks() if t["status"] in OPEN]
+    allopen = sorted((t for t in all_tasks() if t["status"] in OPEN), key=order_key)
     later = [t for t in allopen if snoozed(t)]
     ts = [t for t in allopen if not snoozed(t)]
     back = [t for t in ts if returned(t)]
@@ -607,6 +712,14 @@ def cmd_footer(a):
 def cmd_board(a):
     build_board()
     path = os.path.join(ROOT, "board.html")
+    live = serve_info()
+    if live:
+        url = f"http://127.0.0.1:{live['port']}/"
+        print(url)
+        if a.open:
+            import webbrowser
+            webbrowser.open(url)
+        return
     print("file://" + path)
     if a.open:
         import subprocess, webbrowser
@@ -638,7 +751,7 @@ def _build_board():
     lines = [f"# {TITLE}  (generated {iso(now())})", ""]
     later = sorted((t for t in ts if snoozed(t)), key=lambda t: t["scheduled_for"])
     for st in STATUSES:
-        group = [t for t in ts if t["status"] == st and t not in later]
+        group = sorted((t for t in ts if t["status"] == st and t not in later), key=order_key)
         if st in ("done", "dropped"): group = group[-30:]
         if not group: continue
         lines.append(f"## {LABEL[st]} ({len(group)})")
@@ -651,19 +764,24 @@ def _build_board():
             lines.append(f"- {short(t)}" + (f"  | why: {t['schedule_reason']}" if t.get("schedule_reason") else ""))
         lines.append("")
     write_text(os.path.join(ROOT, "BOARD.md"), "\n".join(lines))
-    # board.html
-    data = json.dumps({"tasks": ts, "sessions": sess, "generated": iso(now()), "title": TITLE,
-                       "home": os.path.expanduser("~").replace("\\", "/"),
-                       "statuses": STATUSES, "labels": LABEL, "stale_hours": STALE_HOURS},
-                      ensure_ascii=False).replace("</", "<\\/")
+    write_text(os.path.join(ROOT, "board.html"), board_html(None, ts, sess))
+
+def board_html(api=None, ts=None, sess=None):
+    """The board page. api={"token"} when served by `bl serve` (enables saving
+    drag-to-reorder); None for the static board.html file."""
+    ts = all_tasks() if ts is None else ts
+    sess = all_sessions() if sess is None else sess
+    js = lambda o: json.dumps(o, ensure_ascii=False).replace("</", "<\\/")
+    data = js({"tasks": ts, "sessions": sess, "generated": iso(now()), "title": TITLE,
+               "home": os.path.expanduser("~").replace("\\", "/"), "owner": OWNER,
+               "statuses": STATUSES, "labels": LABEL, "stale_hours": STALE_HOURS})
     custom = os.path.join(ROOT, "board_template.html")
     if os.path.exists(custom):
         with open(custom, encoding="utf-8-sig") as f:
             tpl = f.read()
     else:
         tpl = BOARD_TEMPLATE
-    out = tpl.replace("/*__DATA__*/null", data)
-    write_text(os.path.join(ROOT, "board.html"), out)
+    return tpl.replace("/*__DATA__*/null", data).replace("/*__API__*/null", js(api))
 
 
 def cmd_init(a):
@@ -748,6 +866,13 @@ def main():
     s.add_argument("--reason", default=""); s.add_argument("--clear", action="store_true", help="bring it back now")
     s.set_defaults(f=cmd_schedule)
 
+    s = sp.add_parser("order", help="set the order of tasks within their column, first = top")
+    s.add_argument("ids", nargs="+"); s.add_argument("--session", required=True); s.set_defaults(f=cmd_order)
+
+    s = sp.add_parser("serve", help="serve the board on 127.0.0.1 so drag-to-reorder is saved")
+    s.add_argument("--port", type=int, default=8765); s.add_argument("--open", action="store_true")
+    s.set_defaults(f=cmd_serve)
+
     s = sp.add_parser("show"); s.add_argument("id"); s.set_defaults(f=cmd_show)
 
     s = sp.add_parser("list"); s.add_argument("--all", action="store_true"); s.add_argument("--area")
@@ -793,8 +918,10 @@ BOARD_TEMPLATE = r"""<!doctype html>
   --bg:#171715;--panel:#21211f;--ink:#ecebe6;--muted:#9c9a92;--line:#33322e;
   --accent:#e07a50;--ok:#55b07c;--warn:#e0a84a;--bad:#f0645a;--chip:#2b2a27;--wait:#a48afb;}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif}
-header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+  display:flex;flex-direction:column;overflow:hidden}
+header{flex:none;position:relative;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
 h1{font-size:18px;margin:0 12px 0 0;letter-spacing:-.01em}
 .stats{display:flex;gap:8px;flex-wrap:wrap}
 .stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:12px;color:var(--muted)}
@@ -804,13 +931,29 @@ h1{font-size:18px;margin:0 12px 0 0;letter-spacing:-.01em}
 select,input{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 8px;font:inherit;font-size:13px}
 label.tog{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px}
 .gen{font-size:11px;color:var(--muted);width:100%}
-main{padding:16px 20px 60px}
-.lane{margin-bottom:22px}
-.lane h2{font-size:14px;margin:0 0 8px;display:flex;gap:8px;align-items:center}
+main{flex:1;min-height:0;overflow:auto;padding:0 20px 60px;overscroll-behavior:contain}
+.lane{margin-bottom:22px;width:max-content;min-width:100%}
+.lane h2{font-size:14px;margin:0;height:40px;display:flex;gap:8px;align-items:center;
+  position:sticky;top:0;z-index:4;background:var(--bg)}
 .lane h2 .n{font-weight:400;color:var(--muted);font-size:12px}
-.cols{display:grid;grid-template-columns:repeat(6,minmax(190px,1fr));gap:10px;overflow-x:auto}
-.col{background:var(--chip);border-radius:10px;padding:8px;min-height:60px}
-.col h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:2px 4px 8px}
+.cols{display:grid;grid-template-columns:repeat(5,minmax(210px,1fr)) minmax(170px,.75fr);gap:10px}
+.col{background:var(--chip);border-radius:10px;padding:0 8px 8px;min-height:60px}
+.col h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 -8px 6px;padding:10px 12px 8px;
+  position:sticky;top:40px;z-index:3;background:var(--chip);border-radius:10px 10px 0 0;display:flex;justify-content:space-between}
+.col h3 .k{font-weight:400;letter-spacing:0}
+.col.sched h3{opacity:.75}
+.pill{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);background:transparent;border:1px dashed var(--line);
+  border-radius:999px;padding:3px 10px;margin-bottom:5px;cursor:pointer;white-space:nowrap;overflow:hidden}
+.pill:hover{border-color:var(--wait);color:var(--ink)}
+.pill b{font-weight:600;color:var(--wait);flex:none}
+.pill span{overflow:hidden;text-overflow:ellipsis}
+.grip{cursor:grab;touch-action:none;user-select:none;color:var(--muted);font-size:14px;line-height:1;padding:2px 6px 2px 0;opacity:.55}
+.card:hover .grip{opacity:1}
+.grip:hover{color:var(--ink)}
+.card.dragging{opacity:.9;box-shadow:0 8px 24px rgba(0,0,0,.25);position:relative;z-index:10;cursor:grabbing}
+.drop-gap{height:6px;border-radius:4px;background:var(--accent);margin:0 0 8px}
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;padding:8px 14px;font-size:12px;color:var(--muted);z-index:20;box-shadow:0 4px 16px rgba(0,0,0,.2);max-width:92vw}
 .card{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;cursor:pointer}
 .card:hover{border-color:var(--accent)}
 .card.s-in_progress{border-left-color:var(--accent)}
@@ -859,7 +1002,7 @@ dialog td:first-child{color:var(--muted);width:130px}
 a{color:var(--accent)}
 button{background:var(--chip);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 12px;font:inherit;cursor:pointer}
 .empty{color:var(--muted);padding:40px;text-align:center}
-@media (max-width:700px){header{padding:12px 16px}main{padding:12px 16px}.cols{grid-template-columns:repeat(6,78vw)}}
+@media (max-width:700px){header{padding:12px 16px}main{padding:0 16px 40px}.cols{grid-template-columns:repeat(5,78vw) 60vw}}
 </style>
 </head>
 <body>
@@ -878,10 +1021,12 @@ button{background:var(--chip);color:var(--ink);border:1px solid var(--line);bord
 <dialog id="dlg"></dialog>
 <script>
 const D = /*__DATA__*/null;
+const API = /*__API__*/null;  // set when served by `bl serve`: drag order is then saved for every session
 document.title = D.title || "Backlog"; document.getElementById("ttl").textContent = D.title || "Backlog";
 const L = D.labels, S = D.sessions;
 const COLS = [["inbox","ready"],["in_progress"],["blocked"],["waiting_user"],[],["done","dropped"]];
 const COLNAME = ["To do","In progress","Blocked",L.waiting_user,"Scheduled","Done"];
+const PRIO = {P0:0,P1:1,P2:2,P3:3};
 const SCHED_COL = 4;
 const OPEN = new Set(["inbox","ready","in_progress","blocked","waiting_user"]);
 const now = Date.now();
@@ -933,7 +1078,7 @@ function render(){
   document.getElementById("stats").innerHTML =
     `<div class="stat"><b>${open.length}</b>open</div>`+
     `<div class="stat"><b>${open.filter(t=>t.status==="in_progress").length}</b>in progress</div>`+
-    `<div class="stat"><b>${open.filter(t=>t.status==="waiting_user").length}</b>waiting on you</div>`+
+    `<div class="stat"><b>${open.filter(t=>t.status==="waiting_user").length}</b>${esc(L.waiting_user.toLowerCase())}</div>`+
     `<div class="stat bad"><b>${open.filter(over).length}</b>overdue</div>`+
     `<div class="stat"><b>${later.length}</b>scheduled</div>`+
     `<div class="stat"><b>${D.tasks.filter(t=>t.status==="done"&&t.completed_at&&now-Date.parse(t.completed_at)<864e5).length}</b>done today</div>`;
@@ -948,13 +1093,75 @@ function render(){
   m.innerHTML = Object.keys(lanes).sort().map(ar=>{
     const ts=lanes[ar];
     return `<section class="lane"><h2>${esc(ar)} <span class="n">${ts.length} task${ts.length>1?"s":""}</span></h2><div class="cols">`+
-      COLS.map((st,i)=>`<div class="col"><h3>${COLNAME[i]}</h3>`+
-        ts.filter(t=>colOf(t)===i).sort(i===SCHED_COL
-          ? (a,b)=>a.scheduled_for.localeCompare(b.scheduled_for)
-          : (a,b)=>(back(b)-back(a))||(a.priority||"").localeCompare(b.priority||"")||a.id.localeCompare(b.id)).map(card).join("")+`</div>`).join("")+
+      COLS.map((st,i)=>{
+        const cs=ts.filter(t=>colOf(t)===i);
+        const body = i===SCHED_COL
+          ? cs.sort((a,b)=>a.scheduled_for.localeCompare(b.scheduled_for)).map(pill).join("")
+          : cs.sort(byOrder(ar,i)).map(card).join("");
+        return `<div class="col${i===SCHED_COL?" sched":""}" data-lane="${esc(ar)}" data-col="${i}"><h3><span>${COLNAME[i]}</span><span class="k">${cs.length||""}</span></h3>${body}</div>`;
+      }).join("")+
       `</div></section>`;
   }).join("");
 }
+// ---- order: back-from-schedule, then new (unranked, by priority), then the user's drag order ----
+const LKEY = "bl-order";
+const localOrder = () => { if(API) return {}; try{ return JSON.parse(localStorage.getItem(LKEY)||"{}"); }catch(e){ return {}; } };
+const LO = localOrder();
+function byOrder(lane, col){
+  const lo = LO[lane+"|"+col] || [];
+  const rk = t => { const i=lo.indexOf(t.id); return i>=0 ? i+1 : t.rank; };
+  return (a,b)=> (back(b)-back(a)) || ((rk(a)!=null)-(rk(b)!=null)) || ((rk(a)??0)-(rk(b)??0))
+    || ((PRIO[a.priority]??9)-(PRIO[b.priority]??9)) || a.id.localeCompare(b.id);
+}
+function pill(t){
+  const n=openDescendants(t).length;
+  const tip=`${t.id} · ${t.title}${t.schedule_reason?" — "+t.schedule_reason:""}`;
+  return `<div class="pill" onclick="openT('${t.id}')" title="${esc(tip)}"><b>${esc(new Date(t.scheduled_for).toLocaleDateString([], {month:"short",day:"numeric"}))}</b><span>${esc(t.id)} ${esc(t.title)}${n?` (+${n})`:""}</span></div>`;
+}
+function toast(msg){
+  const el=document.createElement("div"); el.className="toast"; el.textContent=msg; document.body.appendChild(el);
+  setTimeout(()=>el.remove(), 4000);
+}
+// Drag by the ⋮⋮ grip, within one column only (pointer events: mouse, pen and touch).
+let dragging=false;
+function startDrag(ev, grip){
+  const cardEl=grip.closest(".card"), col=cardEl.parentElement;
+  ev.preventDefault(); ev.stopPropagation(); grip.setPointerCapture(ev.pointerId);
+  dragging=true;
+  const gap=document.createElement("div"); gap.className="drop-gap";
+  const y0=ev.clientY; cardEl.classList.add("dragging");
+  const sc=document.getElementById("main");
+  const move=e=>{
+    cardEl.style.transform=`translateY(${e.clientY-y0}px)`;
+    const sibs=[...col.querySelectorAll(":scope>.card:not(.dragging)")];
+    const before=sibs.find(c=>{ const r=c.getBoundingClientRect(); return e.clientY < r.top + r.height/2; });
+    before ? col.insertBefore(gap,before) : col.appendChild(gap);
+    const r=sc.getBoundingClientRect();  // edge auto-scroll
+    if(e.clientY < r.top+40) sc.scrollTop-=12; else if(e.clientY > r.bottom-40) sc.scrollTop+=12;
+  };
+  const up=()=>{
+    grip.removeEventListener("pointermove",move); grip.removeEventListener("pointerup",up); grip.removeEventListener("pointercancel",up);
+    cardEl.classList.remove("dragging"); cardEl.style.transform="";
+    if(gap.parentElement){ col.insertBefore(cardEl,gap); gap.remove(); }
+    dragging=false;
+    saveOrder(col);
+  };
+  grip.addEventListener("pointermove",move); grip.addEventListener("pointerup",up); grip.addEventListener("pointercancel",up);
+}
+function saveOrder(col){
+  const ids=[...col.querySelectorAll(":scope>.card")].map(c=>c.dataset.id);
+  const key=col.dataset.lane+"|"+col.dataset.col;
+  if(API){
+    fetch("/api/order",{method:"POST",headers:{"Content-Type":"application/json","X-BL-Token":API.token},body:JSON.stringify({ids})})
+      .then(r=>{ if(!r.ok) throw new Error(r.status); ids.forEach((id,i)=>{ if(byId[id]) byId[id].rank=i+1; }); })
+      .catch(()=>toast("Could not save the new order. Is bl serve still running?"));
+  } else {
+    LO[key]=ids; try{ localStorage.setItem(LKEY,JSON.stringify(LO)); }catch(e){}
+    toast("Order saved in this browser only. Open the board with `bl serve` so every session follows it.");
+  }
+}
+document.addEventListener("pointerdown",ev=>{ const g=ev.target.closest&&ev.target.closest(".grip"); if(g) startDrag(ev,g); });
+
 // ---- resources: every link / local file a task mentions, reachable from the card ----
 const RX = /(https?:\/\/[^\s'"<>)\]]+|claude:\/\/[^\s'"<>)\]]+|file:\/\/[^\s'"<>)\]]+|(?:~|\/Users|\/home|[A-Za-z]:\\)[\/\\][^\s'"<>)\],;|]+)/g;
 const trimP = u => u.replace(/[.,;:]+$/,"");
@@ -1018,8 +1225,8 @@ function card(t){
     : back(t) ? `<div class="when back">↻ back from schedule${t.schedule_reason?" · was deferred: "+esc(t.schedule_reason):""}</div>` : "";
   const cu = surl(chatOf(t));
   const chat = cu ? `<a class="chat" href="${esc(cu)}"${tgt(cu)} onclick="event.stopPropagation()" title="Open ${esc(sl(chatOf(t)))}">Open chat ↗</a>` : "";
-  return `<div class="card s-${t.status}${snz(t)?" snz":""}" onclick="openT('${t.id}')">
-    <div class="top"><span>${esc(t.id)} · ${esc(t.priority||"")}</span><span>${L[t.status]}</span></div>
+  return `<div class="card s-${t.status}${snz(t)?" snz":""}" data-id="${esc(t.id)}" onclick="if(!dragging)openT('${t.id}')">
+    <div class="top"><span><span class="grip" title="Drag to reorder" onclick="event.stopPropagation()">⠿</span>${esc(t.id)} · ${esc(t.priority||"")}</span><span>${L[t.status]}</span></div>
     <div class="title">${esc(t.title)}</div>${par}${when}
     <div class="sub">${etaHtml(t)}</div>
     ${t.next_action&&OPEN.has(t.status)?`<div class="sub">Next: ${linkify(t.next_action)}</div>`:""}
@@ -1045,7 +1252,11 @@ function openT(id){
 }
 fillFilters(); render();
 ["q","area","sess","showdone"].forEach(k=>document.getElementById(k).addEventListener("input",render));
-setTimeout(()=>{ if(!document.getElementById("dlg").open) location.reload(); else setInterval(()=>{ if(!dlg.open) location.reload(); },5000); },30000);
+// refresh every 30s, but never mid-drag or with a dialog open, and keep the scroll position
+try{ const p=JSON.parse(sessionStorage.getItem("bl-scroll")||"null"); if(p){ const m=document.getElementById("main"); m.scrollTop=p[0]; m.scrollLeft=p[1]; } }catch(e){}
+setInterval(()=>{ if(dragging||dlg.open) return; const m=document.getElementById("main");
+  try{ sessionStorage.setItem("bl-scroll",JSON.stringify([m.scrollTop,m.scrollLeft])); }catch(e){}
+  location.reload(); },30000);
 </script>
 </body>
 </html>
