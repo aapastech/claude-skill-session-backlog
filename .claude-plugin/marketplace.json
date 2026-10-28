@@ -10,6 +10,11 @@
       "name": "session-backlog",
       "source": "./plugin",
       "description": "Task backlog on your own computer so AI assistants never forget tasks in long or parallel sessions."
+    },
+    {
+      "name": "thridify-release",
+      "source": "./thridify-release",
+      "description": "Thridify production release runbook (release PRs with 3-part notes, risk review, Slack checklists, DB backup, build approval, tags, prod QA)."
     }
   ]
 }

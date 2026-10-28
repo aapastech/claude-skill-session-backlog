@@ -1,0 +1,14 @@
+{
+  "name": "thridify-release",
+  "displayName": "Thridify Release",
+  "version": "1.0.0",
+  "description": "Thridify production release runbook: develop to master release PRs with release, technical and QA notes, customer-data risk review, #release-thridify checklists, DB backup, prod build approval, tags and safe prod QA.",
+  "author": {
+    "name": "Shikha Gupta",
+    "url": "https://github.com/aapastech"
+  },
+  "homepage": "https://github.com/aapastech/claude-skill-session-backlog",
+  "repository": "https://github.com/aapastech/claude-skill-session-backlog",
+  "license": "MIT",
+  "keywords": ["thridify", "release", "deploy", "runbook"]
+}
