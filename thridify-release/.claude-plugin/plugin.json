@@ -1,7 +1,7 @@
 {
   "name": "thridify-release",
   "displayName": "Thridify Release",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Thridify production release runbook: develop to master release PRs with release, technical and QA notes, customer-data risk review, #release-thridify checklists, DB backup, prod build approval, tags and safe prod QA.",
   "author": {
     "name": "Shikha Gupta",

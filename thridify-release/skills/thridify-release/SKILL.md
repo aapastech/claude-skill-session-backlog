@@ -1,6 +1,6 @@
 ---
 name: thridify-release
-description: Ship a Thridify production release from develop to master (thridify-be + thridify-fe, plus any other Thridify repo with unreleased develop commits). Use when the user asks to release Thridify to prod, "plan a prod release", "run the release script", "cut 12.x", or to write release PRs / release notes / the #release-thridify checklist. Covers scoping, 3-part release PR notes (release, technical, QA), risk review for customer data loss, Slack posts before and after, DB backup via thridify-prod-release.sh, merge order, prod Cloud Build approval, tags + GitHub releases, and safe prod QA on admin.thridify.com.
+description: "Ship a Thridify production release from develop to master (thridify-be + thridify-fe, plus any other Thridify repo with unreleased develop commits). Use when the user asks to release Thridify to prod, \"plan a prod release\", \"run the release script\", \"cut 12.x\", or to write release PRs / release notes / the #release-thridify checklist. Covers scoping, 3-part release PR notes (release, technical, QA), risk review for customer data loss, Slack posts before and after, DB backup via thridify-prod-release.sh, merge order, prod Cloud Build approval, tags + GitHub releases, and safe prod QA on admin.thridify.com."
 ---
 
 # Thridify production release
