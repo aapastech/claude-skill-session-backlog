@@ -47,7 +47,16 @@ Then check mergeability: `gh pr view <n> --json mergeable,mergeStateStatus`. If 
 
 ## 3. Slack: release notes + pre-release checklist
 
-Channel **#release-thridify** = `C07D2F85MEH` (private). Post one message: "*Releasing Thridify frontend X + backend Y to prod*", the customer release notes, then a numbered **Pre-release checklist** with links to both PRs and :white_check_mark: / :hourglass_flowing_sand: per item (PRs + notes, master merged into develop, risk review, dev verification, DB dump, merge/approve, tags, prod QA). Use `slack_send_message`.
+Channel **#release-thridify** = `C07D2F85MEH` (private). Post as the **Claude Automation bot**, never through the Slack MCP connector (that posts as Shikha). Use **Block Kit** through `scripts/slackkit.py` in this skill: plain mrkdwn text renders as one grey wall (underscored "headings" come out as faint italics, long checklists get split into a second message that starts at "5.", link lists run together). The user asked for this fix on 2026-11-06.
+
+One message, in this shape (helpers in brackets):
+1. `header("Releasing Thridify frontend X + backend Y to prod")`
+2. `context(...)` one line: both release PR links and versions, "backend merges first".
+3. `divider()`, `heading("Release notes")`, then one `group(title, *bullets)` per customer-facing area (Hotspots, AI images, Customizer, Also...). Bold UI names with `b()`. Dormant features go under *Also* as "built, still switched off".
+4. `divider()`, `heading("Pre-release checklist")`, then `rich(ol(...))` items with `e("white_check_mark")` / `e("hourglass_flowing_sand")` at the end: PRs + notes, mergeable, dev verification, risk review. Put risk-review details in `rich(ul(..., indent=1))` right after the risk item, then continue with `rich(ol(..., offset=N))` so numbering carries on (DB dump, merge/approve, tags, prod QA).
+5. Keep link runs short: list constituent PRs once, not in every item.
+
+Rules: one message (≤ 50 blocks, ≤ 3,000 chars per text field); always pass a `text` fallback; check `ok` and keep the returned `ts`; before any retry, read the channel to see whether the first post landed. Read the post back (`slack_read_channel`, limit 1) to confirm it rendered as one message.
 
 ## 4. DB backup via the release script
 
@@ -100,17 +109,14 @@ Rules:
 
 ## 8. Slack: post-release checklist + done
 
-Post in #release-thridify, same shape the team uses:
-```
-1. Latest database dump is taken: <folder name, size, collections>. :white_check_mark:
-2. <link to the release-notes message|Release notes published>. :white_check_mark:
-3. <be PR link|thridify-be> and <fe PR link|thridify-fe> rebased with master and merged into master. :white_check_mark:
-4. <release links|Release tags created from master, release notes on GitHub for both repos>. :white_check_mark:
-5. Prod backend build approved and deployed (<build id>, build-info reports <version>). :white_check_mark:
-6. Prod QA on admin.thridify.com / viewer: <what was checked>. :white_check_mark:
-7. Plugins (Tyashin, WooCommerce, BigCommerce, Shopify) test stores checked, or say which were not.
-```
-List honestly what was NOT checked in prod and why (paid generation, needs a phone, needs a throwaway product). Then a separate short message: `------------------------------ Released <fe ver> (frontend) + <be ver> (backend) to prod ------------------------------`.
+Post as a **thread reply to the pre-release message** (`post(..., thread_ts=<pre ts>)`) **and** update the pre-release message in place (`post(..., update_ts=<pre ts>)`) so its :hourglass_flowing_sand: items become :white_check_mark:. Same Block Kit shape:
+1. `header("Released: Thridify frontend X + backend Y")`
+2. `rich(ol(...))`, one item each: DB dump (folder, size, collections, gzip, same cluster); release-notes message link; both PRs merged into master, backend first; tags + GitHub releases (links); prod build id + build-info version/commit + migrations recorded with their log counts; frontend Pages commit + viewer release id.
+3. `heading("Prod QA")` + `rich(ul(...))` of what was checked, with links.
+4. `heading("Not checked in prod, on purpose")` + `rich(ul(...))`: say why each was skipped (paid generation, needs a phone, needs a store, writes customer data).
+5. `heading("Follow-ups")` + backlog items, if any.
+
+Then a separate short channel message, not a dashed line (it wraps on phones): `header("Released <fe ver> (frontend) + <be ver> (backend) to prod")` plus one `context` line linking the thread.
 
 Timing reference (12.19.2 run): be prod build ~4 min after approval; Cloudflare Pages admin + viewer ~3–5 min after the fe merge.
 
