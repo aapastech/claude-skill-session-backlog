@@ -60,10 +60,11 @@ Rules: one message (≤ 50 blocks, ≤ 3,000 chars per text field); always pass 
 
 ## 4. DB backup via the release script
 
-Run in a Terminal tab (user types the password):
+Run in a Terminal tab (user types the password). **Dump to local disk, not straight into OneDrive**: on the new release Mac (AdiTM5, macOS 27, OneDrive 26.189) the OneDrive file provider stalled a write ~5 s into two dumps in a row on 2026-11-07 ("operation timed out", the script aborts). Write locally, verify, then copy:
 ```
-zsh /Users/adi/Documents/Claude-Workspace/thridify-prod-release.sh
+mkdir -p "$HOME/Documents/Thridify-db-backups/prod-db" && BACKUP_ROOT="$HOME/Documents/Thridify-db-backups/prod-db" zsh /Users/adi/Documents/Claude-Workspace/thridify-prod-release.sh
 ```
+After verifying, `rsync -a --timeout=60` the folder into `~/Library/CloudStorage/OneDrive-Personal/Thridify/Database backup/prod-db/` (retry on failure) and compare `shasum` of both trees. Older OneDrive dump folders may be cloud-only (they show 8 KB): compare counts against the newest local or materialized dump.
 - Step 1 runs `mongodump` (prompts for the Atlas password) into `~/Library/CloudStorage/OneDrive-Personal/Thridify/Database backup/prod-db/<timestamp>`.
 - Verify the dump before merging: size comparable to the previous dump (tens of MB, not ~1 MB), all ~44+ collections present, `gunzip -t` on the `.gz` files, `users.metadata.json.gz` uuid matches earlier prod dumps (same cluster). A tiny dump means the wrong cluster/db.
 - The script then asks yes/no for: release notes in Slack → PRs merged → builds green → tags created → tag builds green. The user answers in the tab; do the work between prompts and tell them when to say yes.
@@ -74,9 +75,10 @@ zsh /Users/adi/Documents/Claude-Workspace/thridify-prod-release.sh
 2. Approve the prod backend build (Cloud Build, project `thridify`, region `europe-west1`, trigger prod-admin-be-github-build-code). Find it: `gcloud builds list --project=thridify --region=europe-west1 --limit=5 --format='value(id,status,substitutions.BRANCH_NAME,createTime)'` (status `PENDING` awaiting approval). Approve (no gcloud verb):
    ```bash
    curl -s -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H 'Content-Type: application/json' \
-     "https://cloudbuild.googleapis.com/v1/projects/thridify/locations/europe-west1/builds/<id>:approve" \
+     "https://cloudbuild.googleapis.com/v1/projects/thridify/locations/europe-west1/builds/${ID}:approve" \
      -d '{"approvalResult":{"decision":"APPROVED"}}'
    ```
+   In zsh write `${ID}:approve`, never `$ID:approve`: `:a` is a zsh path modifier and the request turns into an HTML 400. The migrations step runs last and can take minutes (the 12.32.0 backfill took ~6 min), so don't treat a long last step as a hang. In zsh `log` is a builtin: use `/usr/bin/log show` for macOS logs.
    Wait for SUCCESS, then confirm the serving version with the prod build-info URL in `~/.config/thridify/build-info-urls.txt` (reports version + commit).
 3. Merge fe after be is live: `gh pr merge <fe> --repo aapastech/thridify-fe --merge`. Cloudflare Pages builds admin + viewer from master (no approval). Confirm: `curl -s https://viewer.thridify.com/viewer/releases.json` shows the merge commit, and admin.thridify.com serves the new bundle.
 4. `mviewer.js` is `max-age=300, stale-while-revalidate=86400`: a browser's first load after deploy may run the old viewer; reload twice when checking.
